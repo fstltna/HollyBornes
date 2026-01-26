@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="iso-8859-1"?>	
+<dialog id="dlg3" title="About..." width="400">
+	<vgroup>			
+		<colgroup columns="2">
+			<label>Last name</label>
+			<textentry id="lastname" advanceoncr="true"/>
+			<label>First name</label>
+			<textentry id="firstname" advanceoncr="true"/>
+			<label>Street</label>
+		</colgroup>	
+		<hgroup>
+			<button id="done" hint="positive">OK</button>
+		</hgroup>	
+	</vgroup>					
+</dialog>
