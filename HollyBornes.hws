@@ -1,291 +1,691 @@
-/****************************************************************
-**                                                             **
-** Name:        Dialogs                                        **
-** Author:      Andreas Falkenhahn                             **
-** Version:     1.2                                            **
-** Date:        03.09.19                                       **
-** Interpreter: Hollywood 9.0                                  **
-** Licence:     Sample program                                 **
-** Function:    Demonstrates how to use dialogs in RapaGUI     **
-**                                                             **
-** History:                                                    **
-**                                                             **
-** 1.2: (03.09.19)                                             **
-**                                                             **
-** - adapted for RapaGUI 2.0                                   **
-**                                                             **
-** 1.1: (11.07.18)                                             **
-**                                                             **
-** - sets dialog button hints now for Android                  **
-**                                                             **
-** 1.0: (06.05.16)                                             **
-**                                                             **
-** - initial release                                           **
-**                                                             **
-****************************************************************/
+; ============================================================================
+; MILLE BORNES  -  Hollywood + RapaGUI
+; You (player 0) against the Computer (player 1). First to exactly 1000 km wins.
+; Requires: Hollywood 9+ and the RapaGUI plugin.
+; Run with:  Hollywood MilleBornes.hws      (or compile it to an executable)
+; ============================================================================
 
-/*
-** Make sure we have at least Hollywood 9.0!
-*/
-@VERSION 9,0
-
-
-/*
-** Enable DPI-awareness so that our GUI looks sharp even on high DPI monitors
-*/
-@OPTIONS {DPIAware = True}
-
-
-/*
-** This script requires the RapaGUI plugin
-*/
 @REQUIRE "RapaGUI"
 
+@APPTITLE "Mille Bornes"
+@APPVERSION "$VER: MilleBornes 1.0 (23.10.2026)"
+@APPAUTHOR "You"
+@APPCOPYRIGHT "Public domain"
+@APPDESCRIPTION "The classic French road-race card game"
 
-/*
-** Information about this app
-*/
-@APPTITLE "HollyBornes"
-@APPVERSION "$VER: HollyBornes 0.1 (01.26.2026)"
-@APPCOPYRIGHT "(C) 2026 Marisa Giancarla"
-@APPAUTHOR "Marisa Giancarla"
-@APPDESCRIPTION "Version of Mille Bornes written in Hollywood"
+; ---- Card IDs --------------------------------------------------------------
+Const #D25    = 0
+Const #D50    = 1
+Const #D75    = 2
+Const #D100   = 3
+Const #D200   = 4
+Const #ACC    = 5    ; hazards
+Const #GAS    = 6
+Const #TIRE   = 7
+Const #LIM    = 8
+Const #STOP   = 9
+Const #REP    = 10   ; remedies
+Const #FUEL   = 11
+Const #SPARE  = 12
+Const #ENDLIM = 13
+Const #GO     = 14
+Const #ACE    = 15   ; safeties
+Const #TANK   = 16
+Const #PROOF  = 17
+Const #ROW    = 18
 
+; ---- Player status (besides the hazard IDs themselves) ---------------------
+Const #ROLL   = 20   ; free to drive
+Const #NEEDGO = 21   ; stopped, needs a GO card
 
-/*
-** Our XML GUI definition
-*/
-@FILE 1, "HollyBornes.xml"
-@FILE 2, "Edit.xml"
-@FILE 3, "Progress.xml"
-/*@FILE 4, "About.xml" */
+Global G
+G = {}
 
-
-/*
-** Create our dialog
-*/
-Function p_CreateDialog()
-	
-	Seek(2, 0)
-	
-	Local xml$ = ReadString(2)
-	
-	; don't use Textentry.AdvanceOnCR on Android for the last widget because it will
-	; cause the first entry widget to be activated again when pressing "Next"
-	If GetVersion().Platform = "Android"
-		xml$ = ReplaceStr(xml$, "<textentry id=\"country\" advanceoncr=\"true\"/>", "<textentry id=\"country\"/>")
-	EndIf			
-	
-	; conveniently create new dialog from an external *.xml and use our main window as the parent
-	; see the RapaGUI documentation to find out why you should create dialogs only temporarily
-	moai.CreateDialog(xml$, "win")
-
-EndFunction
-		
-		
-/*
-** Open our dialog
-*/		
-Function p_OpenDialog()
-	; start modal dialog loop
-	moai.DoMethod("dlg", "showmodal")	
-EndFunction
-
-
-/*
-** Close our dialog
-*/
-Function p_CloseDialog()
-
-	; this will automatically destroy the dialog
-	moai.DoMethod("dlg", "endmodal", 0)	
-					
-EndFunction
-		
-		
-/*
-** Fill dialog fields with contents from listview
-*/				
-Function p_Edit()
-
-	Local state, lastname$, firstname$, street$, city$, zip$, country$ = moai.DoMethod("lv", "getentry", "active")
-	
-	editmode = True
-	
-	p_CreateDialog()
-	
-	moai.Set("lastname", "text", lastname$)
-	moai.Set("firstname", "text", firstname$)
-	moai.Set("street", "text", street$)
-	moai.Set("city", "text", city$)
-	moai.Set("zip", "text", zip$)
-	moai.Set("country", "text", country$)
-						
-	p_OpenDialog()
-					
+; ============================================================================
+;  CARD DATABASE
+; ============================================================================
+Function p_Count(c)
+   If c <= #D75 Then Return(10)
+   If c = #D100 Then Return(12)
+   If c = #D200 Then Return(4)
+   If c = #ACC Or c = #GAS Or c = #TIRE Then Return(3)
+   If c = #LIM Then Return(4)
+   If c = #STOP Then Return(5)
+   If c = #REP Or c = #FUEL Or c = #SPARE Or c = #ENDLIM Then Return(6)
+   If c = #GO Then Return(14)
+   Return(1)
 EndFunction
 
-
-/*
-** Update button states depending on currently active entry
-*/
-Function p_RefreshButtons(active)
-	
-	moai.Set("rem", "disabled", active = -1)
-	moai.Set("edit", "disabled", active = -1)			
-	moai.Set("mvup", "disabled", (active <= 0))
-	moai.Set("mvdown", "disabled", (active = -1) Or (active = moai.Get("lv", "entries") - 1))	
-
+Function p_Name$(c)
+   Switch c
+   Case #D25:    Return("25 km")
+   Case #D50:    Return("50 km")
+   Case #D75:    Return("75 km")
+   Case #D100:   Return("100 km")
+   Case #D200:   Return("200 km")
+   Case #ACC:    Return("ACCIDENT (hazard)")
+   Case #GAS:    Return("OUT OF GAS (hazard)")
+   Case #TIRE:   Return("FLAT TIRE (hazard)")
+   Case #LIM:    Return("SPEED LIMIT (hazard)")
+   Case #STOP:   Return("STOP (hazard)")
+   Case #REP:    Return("Repairs (remedy)")
+   Case #FUEL:   Return("Gasoline (remedy)")
+   Case #SPARE:  Return("Spare Tire (remedy)")
+   Case #ENDLIM: Return("End of Limit (remedy)")
+   Case #GO:     Return("GO (remedy)")
+   Case #ACE:    Return("* Driving Ace * (safety)")
+   Case #TANK:   Return("* Extra Tank * (safety)")
+   Case #PROOF:  Return("* Puncture-Proof * (safety)")
+   Case #ROW:    Return("* Right of Way * (safety)")
+   EndSwitch
+   Return("?")
 EndFunction
 
-
-/*
-** Helper function to show/hide a dialog
-*/	
-Function p_ShowHideDialog(dlg$, flag)
-	
-	If flag
-		moai.Set("app", "sleep", True)
-		moai.Set(dlg$, "open", True)
-	Else
-		moai.Set(dlg$, "open", False)
-		moai.FreeDialog(dlg$)	
-		moai.Set("app", "sleep", False)	
-	EndIf
-					
+Function p_Short$(c)
+   ; short card name for the log
+   Switch c
+   Case #ACC:    Return("Accident")
+   Case #GAS:    Return("Out of Gas")
+   Case #TIRE:   Return("Flat Tire")
+   Case #LIM:    Return("Speed Limit")
+   Case #STOP:   Return("Stop")
+   Case #REP:    Return("Repairs")
+   Case #FUEL:   Return("Gasoline")
+   Case #SPARE:  Return("Spare Tire")
+   Case #ENDLIM: Return("End of Limit")
+   Case #GO:     Return("GO")
+   Case #ACE:    Return("Driving Ace")
+   Case #TANK:   Return("Extra Tank")
+   Case #PROOF:  Return("Puncture-Proof")
+   Case #ROW:    Return("Right of Way")
+   EndSwitch
+   Return(p_Name$(c))
 EndFunction
 
-					
-/*
-** Handler function for our progress bar dialog
-*/	
-Function p_DialogFunc(msg)
-	; update progress bar
-	moai.Set("prgbar", "level", msg.userdata)
-	
-	If abortpressed = True      ; abort button pressed?
-		p_ShowHideDialog("dlg2", False)
-		moai.Request("", "Dialog aborted!", "OK", "error")
-	ElseIf msg.userdata = 100   ; progress bar completed?
-		p_ShowHideDialog("dlg2", False)
-		moai.Request("", "Dialog completed!", "OK")
-	Else	
-		; not finished yet? call us again!
-		RunCallback(p_DialogFunc, msg.userdata + 1)
-		
-		; this is only to slow things down so that we're simulating
-		; a real progress bar; in a real app, there's no need to
-		; insert a delay
-		Wait(20, #MILLISECONDS)				
-	EndIf
+Function p_Kind(c)
+   If c <= #D200 Then Return(0)   ; distance
+   If c <= #STOP Then Return(1)   ; hazard
+   If c <= #GO Then Return(2)     ; remedy
+   Return(3)                      ; safety
 EndFunction
 
-
-/*
-** Just a test for function-based dialogs
-*/
-Function p_TestProgressbarDialog()
-
-	abortpressed = False
-
-	Seek(3, 0)
-	
-	; conveniently create new dialog from an external *.xml and use our main window as the parent
-	; see the RapaGUI documentation to find out why you should create dialogs only temporarily	
-	moai.CreateDialog(ReadString(3), "win")
-	
-	; show dialog
-	p_ShowHideDialog("dlg2", True)
-		
-	; do some work and then return	
-	p_DialogFunc({userdata = 0})
-					
-EndFunction
-					
-Function p_AboutDialog() /* ZZZ */
-	editmode = False
-	p_CreateDialog()
-	p_OpenDialog()
+Function p_DistKm(c)
+   Switch c
+   Case #D25:  Return(25)
+   Case #D50:  Return(50)
+   Case #D75:  Return(75)
+   Case #D100: Return(100)
+   Case #D200: Return(200)
+   EndSwitch
+   Return(0)
 EndFunction
 
-/*
-** Handles all incoming events
-*/		
-Function p_EventFunc(msg)
-
-	Switch msg.action
-	Case "RapaGUI":
-		Switch msg.attribute
-		Case "Active":
-			p_RefreshButtons(msg.triggervalue)
-		Case "Selected":
-			Switch msg.id
-			Case "mn_about":
-				p_AboutDialog()	
-			Case "mn_prgbar":
-				p_TestProgressbarDialog()	
-			Case "mn_exit":
-				End
-			EndSwitch		
-		Case "Pressed":
-			Switch msg.id
-			Case "add"
-				editmode = False
-				p_CreateDialog()
-				p_OpenDialog()
-			Case "rem"
-				moai.DoMethod("lv", "remove", "active")	
-			Case "edit"
-				p_Edit()
-			Case "mvup"
-				Local c = moai.Get("lv", "active")
-				moai.DoMethod("lv", "exchange", "active", "previous")
-				moai.Set("lv", "active", c - 1)
-			Case "mvdown"
-				Local c = moai.Get("lv", "active")				
-				moai.DoMethod("lv", "exchange", "active", "next")			
-				moai.Set("lv", "active", c + 1)
-			Case "ok"
-				Local lastname$ = moai.Get("lastname", "text")
-				Local firstname$ = moai.Get("firstname", "text")
-				Local street$ = moai.Get("street", "text")
-				Local city$ = moai.Get("city", "text")
-				Local zip$ = moai.Get("zip", "text")
-				Local country$ = moai.Get("country", "text")
-				
-				If (lastname$ = "") Or (firstname$ = "")
-					moai.Request("", "Please fill out all required fields!", "OK", "error")
-					Return
-				EndIf
-																											
-				p_CloseDialog()				
-
-				If editmode = False
-					pos = moai.DoMethod("lv", "insert", "bottom", "false", lastname$, firstname$, street$, city$, zip$, country$)
-				Else
-					moai.DoMethod("lv", "rename", "active", "false", lastname$, firstname$, street$, city$, zip$, country$)					
-				EndIf	
-				
-				Local active = moai.Get("lv", "active")
-				If active <> -1 Then p_RefreshButtons(active)
-			Case "cancel"
-				p_CloseDialog()	
-			Case "stop"
-				abortpressed = True																									
-			EndSwitch	
-		EndSwitch
-	EndSwitch
-			
+; index (0..3) of the safety that protects against hazard h
+Function p_SafIdx(h)
+   Switch h
+   Case #ACC:  Return(0)
+   Case #GAS:  Return(1)
+   Case #TIRE: Return(2)
+   EndSwitch
+   Return(3)   ; limit + stop -> Right of Way
 EndFunction
-	
-; dynamically create GUI from an external *.xml file definition
-moai.CreateApp(ReadString(1))
 
-; listen to these events!
-InstallEventHandler({RapaGUI = p_EventFunc})
+Function p_Who$(w)
+   If w = 0 Then Return("You")
+   Return("Computer")
+EndFunction
 
-; main loop!
+Function p_Obj$(w)
+   If w = 0 Then Return("you")
+   Return("the Computer")
+EndFunction
+
+; ============================================================================
+;  GAME STATE
+; ============================================================================
+Function p_NewPlayer()
+   Local p, i
+   p = {}
+   p.km = 0
+   p.status = #NEEDGO
+   p.limit = False
+   p.n200 = 0
+   p.hn = 0
+   p.hand = {}
+   p.saf = {}
+   For i = 0 To 3
+      p.saf[i] = False
+   Next
+   Return(p)
+EndFunction
+
+Function p_BuildDeck()
+   Local c, k, i, j, t
+   G.deck = {}
+   G.dn = 0
+   For c = 0 To 18
+      For k = 1 To p_Count(c)
+         G.deck[G.dn] = c
+         G.dn = G.dn + 1
+      Next
+   Next
+   For i = G.dn - 1 To 1 Step -1
+      j = Rnd(i + 1)
+      t = G.deck[i]
+      G.deck[i] = G.deck[j]
+      G.deck[j] = t
+   Next
+EndFunction
+
+Function p_Draw(w)
+   If G.dn <= 0 Then Return(False)
+   If G.P[w].hn >= 7 Then Return(False)
+   G.dn = G.dn - 1
+   G.P[w].hand[G.P[w].hn] = G.deck[G.dn]
+   G.P[w].hn = G.P[w].hn + 1
+   Return(True)
+EndFunction
+
+Function p_Remove(w, slot)
+   Local i
+   For i = slot To G.P[w].hn - 2
+      G.P[w].hand[i] = G.P[w].hand[i + 1]
+   Next
+   G.P[w].hn = G.P[w].hn - 1
+EndFunction
+
+Function p_Log(s$)
+   moai.DoMethod("log", "insert", "top", s$)
+EndFunction
+
+; ============================================================================
+;  RULES
+; ============================================================================
+Function p_CanPlay(w, c)
+   Local o, k, st
+   o = 1 - w
+   k = p_Kind(c)
+   st = G.P[w].status
+
+   If k = 0
+      If st <> #ROLL Then Return(False)
+      If G.P[w].km + p_DistKm(c) > 1000 Then Return(False)
+      If G.P[w].limit = True And p_DistKm(c) > 50 Then Return(False)
+      If c = #D200 And G.P[w].n200 >= 2 Then Return(False)
+      Return(True)
+   EndIf
+
+   If k = 1
+      If c = #LIM
+         Return(G.P[o].limit = False And G.P[o].saf[3] = False)
+      EndIf
+      If G.P[o].status <> #ROLL Then Return(False)
+      If G.P[o].saf[p_SafIdx(c)] = True Then Return(False)
+      Return(True)
+   EndIf
+
+   If k = 2
+      Switch c
+      Case #REP:    Return(st = #ACC)
+      Case #FUEL:   Return(st = #GAS)
+      Case #SPARE:  Return(st = #TIRE)
+      Case #ENDLIM: Return(G.P[w].limit)
+      Case #GO:     Return(st = #NEEDGO Or st = #STOP)
+      EndSwitch
+      Return(False)
+   EndIf
+
+   Return(True)   ; safeties can always be played
+EndFunction
+
+; Applies card c played by w. Returns True if the player gets an extra turn.
+Function p_Apply(w, c)
+   Local o, k, who$, hz
+   o = 1 - w
+   k = p_Kind(c)
+   who$ = p_Who$(w)
+
+   If k = 0
+      G.P[w].km = G.P[w].km + p_DistKm(c)
+      If c = #D200 Then G.P[w].n200 = G.P[w].n200 + 1
+      p_Log(who$ .. " drove " .. p_Name$(c) .. "  (" .. Str(G.P[w].km) .. " km)")
+      Return(False)
+   EndIf
+
+   If k = 1
+      If c = #LIM
+         G.P[o].limit = True
+      Else
+         G.P[o].status = c
+      EndIf
+      p_Log(who$ .. " played " .. p_Short$(c) .. " on " .. p_Obj$(o) .. "!")
+      Return(False)
+   EndIf
+
+   If k = 2
+      If c = #ENDLIM
+         G.P[w].limit = False
+      ElseIf c = #GO
+         G.P[w].status = #ROLL
+      Else
+         If G.P[w].saf[3] = True
+            G.P[w].status = #ROLL
+         Else
+            G.P[w].status = #NEEDGO
+         EndIf
+      EndIf
+      p_Log(who$ .. " played " .. p_Short$(c))
+      Return(False)
+   EndIf
+
+   ; ---- safeties ----
+   G.P[w].saf[c - 15] = True
+   If c = #ROW
+      G.P[w].limit = False
+      If G.P[w].status = #NEEDGO Or G.P[w].status = #STOP Then G.P[w].status = #ROLL
+   Else
+      hz = c - 10    ; ACE->ACC, TANK->GAS, PROOF->TIRE
+      If G.P[w].status = hz
+         If G.P[w].saf[3] = True
+            G.P[w].status = #ROLL
+         Else
+            G.P[w].status = #NEEDGO
+         EndIf
+      EndIf
+   EndIf
+   p_Log(who$ .. " played " .. p_Short$(c) .. " - extra turn!")
+   Return(True)
+EndFunction
+
+Function p_Finish()
+   Local msg$
+   G.over = True
+   If G.P[0].km = G.P[1].km
+      msg$ = "It's a draw at " .. Str(G.P[0].km) .. " km!"
+   ElseIf G.P[0].km > G.P[1].km
+      msg$ = "You win!  " .. Str(G.P[0].km) .. " km to " .. Str(G.P[1].km) .. " km."
+   Else
+      msg$ = "The Computer wins.  " .. Str(G.P[1].km) .. " km to " .. Str(G.P[0].km) .. " km."
+   EndIf
+   p_Log("*** GAME OVER: " .. msg$)
+   p_Refresh()
+   moai.Request("Game over", msg$, "OK")
+EndFunction
+
+; returns True (and finishes the game) if the game is over
+Function p_CheckEnd()
+   If G.over = True Then Return(True)
+   If G.P[0].km = 1000 Or G.P[1].km = 1000
+      p_Finish()
+      Return(True)
+   EndIf
+   If G.dn = 0 And G.P[0].hn = 0 And G.P[1].hn = 0
+      p_Finish()
+      Return(True)
+   EndIf
+   Return(False)
+EndFunction
+
+; ============================================================================
+;  COMPUTER PLAYER
+; ============================================================================
+Function p_Score(c)
+   Local k, s, st
+   k = p_Kind(c)
+   st = G.P[1].status
+   If k = 0
+      s = 30 + p_DistKm(c) / 10
+      If G.P[1].km + p_DistKm(c) = 1000 Then s = 200
+      Return(s)
+   EndIf
+   If k = 1
+      If c = #LIM Then Return(35)
+      If c = #STOP Then s = 70 Else s = 75
+      If G.P[0].km >= 700 Then s = s + 20
+      Return(s)
+   EndIf
+   If k = 2
+      If c = #ENDLIM Then Return(50)
+      Return(95)
+   EndIf
+   If c - 10 = st Then Return(100)
+   Return(90)
+EndFunction
+
+Function p_Keep(c)
+   ; how much the computer wants to hold on to a card (lowest gets discarded)
+   Local k
+   k = p_Kind(c)
+   If k = 0 Then Return(10 + p_DistKm(c) / 20)
+   If k = 3 Then Return(100)
+   If k = 1
+      If c = #LIM
+         If G.P[0].saf[3] = True Then Return(2)
+         Return(12)
+      EndIf
+      If G.P[0].saf[p_SafIdx(c)] = True Then Return(2)
+      Return(15)
+   EndIf
+   ; remedies
+   Switch c
+   Case #REP:    If G.P[1].saf[0] = True Then Return(0)
+   Case #FUEL:   If G.P[1].saf[1] = True Then Return(0)
+   Case #SPARE:  If G.P[1].saf[2] = True Then Return(0)
+   Case #ENDLIM: If G.P[1].saf[3] = True Then Return(0)
+   Case #GO:     If G.P[1].saf[3] = True Then Return(0)
+   EndSwitch
+   If c = #GO Then Return(50)
+   Return(40)
+EndFunction
+
+Function p_AITurn()
+   Local again, slot, i, best, bestS, s, c
+   Repeat
+      again = False
+      p_Draw(1)
+      If G.P[1].hn = 0 Then Return
+
+      best = -1
+      bestS = 0
+      For i = 0 To G.P[1].hn - 1
+         If p_CanPlay(1, G.P[1].hand[i]) = True
+            s = p_Score(G.P[1].hand[i])
+            If s > bestS
+               bestS = s
+               best = i
+            EndIf
+         EndIf
+      Next
+
+      If best >= 0
+         c = G.P[1].hand[best]
+         p_Remove(1, best)
+         again = p_Apply(1, c)
+      Else
+         best = 0
+         bestS = p_Keep(G.P[1].hand[0])
+         For i = 1 To G.P[1].hn - 1
+            s = p_Keep(G.P[1].hand[i])
+            If s < bestS
+               bestS = s
+               best = i
+            EndIf
+         Next
+         c = G.P[1].hand[best]
+         p_Remove(1, best)
+         p_Log("Computer discarded " .. p_Short$(c))
+      EndIf
+
+      If p_CheckEnd() = True Then Return
+   Until again = False
+EndFunction
+
+; ============================================================================
+;  HUMAN PLAYER
+; ============================================================================
+Function p_EndHumanTurn()
+   p_AITurn()
+   If G.over = True Then Return
+   ; if the human has run out of cards (empty deck) the computer keeps playing
+   While G.P[0].hn = 0 And G.P[1].hn > 0 And G.over = False
+      p_AITurn()
+   Wend
+   If G.over = True Then Return
+   p_Draw(0)
+   p_Refresh()
+EndFunction
+
+Function p_HumanPlay()
+   Local c, extra
+   If G.over = True Then Return
+   If G.sel < 0 Or G.sel >= G.P[0].hn
+      p_Log("Select a card in your hand first.")
+      Return
+   EndIf
+   c = G.P[0].hand[G.sel]
+   If p_CanPlay(0, c) = False
+      p_Log("You can't play " .. p_Short$(c) .. " right now. Discard it?")
+      Return
+   EndIf
+   p_Remove(0, G.sel)
+   extra = p_Apply(0, c)
+   If p_CheckEnd() = True Then Return
+   If extra = True
+      p_Draw(0)
+      p_Refresh()
+      Return
+   EndIf
+   p_Refresh()
+   p_EndHumanTurn()
+EndFunction
+
+Function p_HumanDiscard()
+   Local c
+   If G.over = True Then Return
+   If G.sel < 0 Or G.sel >= G.P[0].hn
+      p_Log("Select a card to discard first.")
+      Return
+   EndIf
+   c = G.P[0].hand[G.sel]
+   p_Remove(0, G.sel)
+   p_Log("You discarded " .. p_Short$(c))
+   If p_CheckEnd() = True Then Return
+   p_Refresh()
+   p_EndHumanTurn()
+EndFunction
+
+; ============================================================================
+;  USER INTERFACE
+; ============================================================================
+Function p_Bar$(km)
+   Local n, i, s$
+   n = Int(km / 50)
+   s$ = "["
+   For i = 1 To 20
+      If i <= n
+         s$ = s$ .. "="
+      Else
+         s$ = s$ .. "-"
+      EndIf
+   Next
+   Return(s$ .. "]")
+EndFunction
+
+Function p_StatusText$(w)
+   Local st
+   st = G.P[w].status
+   Local s$
+   Switch st
+   Case #ROLL:   s$ = "Rolling"
+   Case #NEEDGO: s$ = "Stopped - needs a GO card"
+   Case #ACC:    s$ = "ACCIDENT - needs Repairs"
+   Case #GAS:    s$ = "OUT OF GAS - needs Gasoline"
+   Case #TIRE:   s$ = "FLAT TIRE - needs Spare Tire"
+   Case #STOP:   s$ = "STOP - needs a GO card"
+   EndSwitch
+   If G.P[w].limit = True Then s$ = s$ .. "   |   SPEED LIMIT 50"
+   Return(s$)
+EndFunction
+
+Function p_SafetyText$(w)
+   Local s$
+   s$ = ""
+   If G.P[w].saf[0] = True Then s$ = s$ .. "Driving Ace  "
+   If G.P[w].saf[1] = True Then s$ = s$ .. "Extra Tank  "
+   If G.P[w].saf[2] = True Then s$ = s$ .. "Puncture-Proof  "
+   If G.P[w].saf[3] = True Then s$ = s$ .. "Right of Way  "
+   If s$ = "" Then s$ = "(no safeties)"
+   Return("Safeties: " .. s$ .. "   |   200s: " .. Str(G.P[w].n200) .. "/2")
+EndFunction
+
+Function p_Refresh()
+   Local i, c, w, t$
+   For w = 0 To 1
+      moai.Set("km" .. Str(w), "text", p_Bar$(G.P[w].km) .. "  " .. Str(G.P[w].km) .. " / 1000 km")
+      moai.Set("st" .. Str(w), "text", p_StatusText$(w))
+      moai.Set("sf" .. Str(w), "text", p_SafetyText$(w))
+   Next
+   moai.Set("deckinfo", "text", "Draw pile: " .. Str(G.dn) .. " cards     Computer holds " .. Str(G.P[1].hn) .. " cards")
+
+   moai.DoMethod("hand", "clear")
+   For i = 0 To G.P[0].hn - 1
+      c = G.P[0].hand[i]
+      t$ = p_Name$(c)
+      If p_CanPlay(0, c) = True
+         t$ = t$ .. "     <- playable"
+      EndIf
+      moai.DoMethod("hand", "insert", "bottom", t$)
+   Next
+   G.sel = -1
+EndFunction
+
+Function p_NewGame()
+   Local w, i
+   G.P = {}
+   For w = 0 To 1
+      G.P[w] = p_NewPlayer()
+   Next
+   p_BuildDeck()
+   For i = 1 To 6
+      p_Draw(0)
+      p_Draw(1)
+   Next
+   p_Draw(0)
+   G.over = False
+   G.sel = -1
+   moai.DoMethod("log", "clear")
+   p_Log("New game! First to exactly 1000 km wins. You start - you need a GO card to get rolling.")
+   p_Refresh()
+EndFunction
+
+Function p_Rules()
+   moai.Request("Mille Bornes - Rules", ..
+      "Goal: be the first to travel exactly 1000 km.\n\n" .. ..
+      "Each turn you draw a card, then play or discard one.\n\n" .. ..
+      "DISTANCE cards move you, but only while rolling. You need a GO card to start, " .. ..
+      "and again after every hazard is repaired. Only two 200 km cards per game. " .. ..
+      "Under a SPEED LIMIT you may only play 25 or 50 km.\n\n" .. ..
+      "HAZARDS (Accident, Out of Gas, Flat Tire, Stop) can only be played on a " .. ..
+      "rolling opponent; Speed Limit can be played any time.\n\n" .. ..
+      "REMEDIES: Repairs, Gasoline, Spare Tire fix their hazard (then you need GO). " .. ..
+      "GO fixes Stop. End of Limit removes the speed limit.\n\n" .. ..
+      "SAFETIES give permanent protection and an extra turn. Right of Way makes " .. ..
+      "you immune to Stop and Speed Limit and means you never need GO.\n\n" .. ..
+      "If the draw pile runs out, whoever has gone farthest wins.\n\n" .. ..
+      "(Simplified: no coup fourre, no scoring bonuses.)", "OK")
+EndFunction
+
+Function p_About()
+   moai.Request("About Mille Bornes", ..
+      "Mille Bornes 1.0\n\n" .. ..
+      "The classic French road-race card game,\n" .. ..
+      "written in Hollywood with RapaGUI.\n\n" .. ..
+      "Play against the Computer and be the first\n" .. ..
+      "to travel exactly 1000 km.", "OK")
+EndFunction
+
+Function p_Event(msg)
+   Switch msg.class
+   Case "Window":
+      If msg.attribute = "CloseRequest" Then End
+
+   Case "Menuitem":
+      If msg.attribute = "Selected"
+         Switch msg.id
+         Case "mnew":
+            p_NewGame()
+         Case "mrules":
+            p_Rules()
+         Case "mabout":
+            p_About()
+         Case "mquit":
+            End
+         EndSwitch
+      EndIf
+
+   Case "Listview":
+      If msg.id = "hand" And msg.attribute = "Active"
+         If GetType(msg.triggervalue) = #NUMBER
+            G.sel = msg.triggervalue
+         Else
+            G.sel = -1
+         EndIf
+      EndIf
+
+   Case "Button":
+      If msg.attribute = "Pressed"
+         Switch msg.id
+         Case "bplay":
+            p_HumanPlay()
+         Case "bdiscard":
+            p_HumanDiscard()
+         Case "bnew":
+            p_NewGame()
+         EndSwitch
+      EndIf
+   EndSwitch
+EndFunction
+
+; ============================================================================
+;  MAIN
+; ============================================================================
+SeedRnd(GetTimer(1))
+
+moai.CreateApp([[
+<?xml version="1.0" encoding="iso-8859-1"?>
+<application id="app">
+   <menubar id="mb">
+      <menu title="Game">
+         <item id="mnew">New game</item>
+         <item id="mrules">Rules...</item>
+         <item id="mabout">About...</item>
+         <item/>
+         <item id="mquit">Quit</item>
+      </menu>
+   </menubar>
+
+   <window id="win" title="Mille Bornes" menubar="mb" notify="closerequest">
+      <vgroup>
+         <hgroup>
+            <vgroup frame="true" frametitle="You">
+               <text id="km0"> </text>
+               <text id="st0"> </text>
+               <text id="sf0"> </text>
+            </vgroup>
+            <vgroup frame="true" frametitle="Computer">
+               <text id="km1"> </text>
+               <text id="st1"> </text>
+               <text id="sf1"> </text>
+            </vgroup>
+         </hgroup>
+
+         <text id="deckinfo"> </text>
+
+         <vgroup frame="true" frametitle="Your hand - select a card, then Play or Discard">
+            <listview id="hand" notify="active">
+               <column/>
+            </listview>
+            <hgroup>
+               <button id="bplay">Play card</button>
+               <button id="bdiscard">Discard card</button>
+               <button id="bnew">New game</button>
+            </hgroup>
+         </vgroup>
+
+         <vgroup frame="true" frametitle="Game log (newest first)">
+            <listview id="log">
+               <column/>
+            </listview>
+         </vgroup>
+      </vgroup>
+   </window>
+</application>
+]])
+
+InstallEventHandler({RapaGUI = p_Event})
+
+p_NewGame()
+
 Repeat
-	WaitEvent
+   WaitEvent
 Forever
-	
