@@ -1,14 +1,15 @@
 ; ============================================================================
-; MILLE BORNES  -  Hollywood + RapaGUI
-; You (player 0) against the Computer (player 1). First to exactly 1000 km wins.
+; HOLLYBORNES  -  Hollywood + RapaGUI
+; Play against the Computer, or online against another human through the
+; matchmaking server (see server/hollyserver.c). First to exactly 1000 km wins.
 ; Requires: Hollywood 9+ and the RapaGUI plugin.
-; Run with:  Hollywood MilleBornes.hws      (or compile it to an executable)
+; Run with:  Hollywood HollyBornes.hws      (or compile it to an executable)
 ; ============================================================================
 
 @REQUIRE "RapaGUI"
 
-@APPTITLE "Mille Bornes"
-@APPVERSION "$VER: MilleBornes 1.0 (23.10.2026)"
+@APPTITLE "HollyBornes"
+@APPVERSION "$VER: HollyBornes 1.1 (25.10.2026)"
 @APPAUTHOR "You"
 @APPCOPYRIGHT "Public domain"
 @APPDESCRIPTION "The classic French road-race card game"
@@ -38,8 +39,18 @@ Const #ROW    = 18
 Const #ROLL   = 20   ; free to drive
 Const #NEEDGO = 21   ; stopped, needs a GO card
 
+Const #NETID  = 1    ; connection identifier used for the matchmaking server
+
 Global G
 G = {}
+G.mode = 0            ; 0 = vs computer, 1 = online
+G.net = False         ; connected to the matchmaking server?
+G.myturn = True
+G.over = True
+G.seat = 0
+G.rx = ""             ; receive buffer
+G.oppname = "Computer"
+G.sel = -1
 
 ; ============================================================================
 ;  CARD DATABASE
@@ -132,12 +143,22 @@ EndFunction
 
 Function p_Who$(w)
    If w = 0 Then Return("You")
-   Return("Computer")
+   Return(G.oppname)
 EndFunction
 
 Function p_Obj$(w)
    If w = 0 Then Return("you")
-   Return("the Computer")
+   If G.mode = 0 Then Return("the " .. G.oppname)
+   Return(G.oppname)
+EndFunction
+
+Function p_S$(n)
+   Return("" .. n)
+EndFunction
+
+Function p_Clean$(s$)
+   s$ = ReplaceStr(s$, " ", "_")
+   Return(LeftStr(s$, 16))
 EndFunction
 
 ; ============================================================================
@@ -248,7 +269,7 @@ Function p_Apply(w, c)
    If k = 0
       G.P[w].km = G.P[w].km + p_DistKm(c)
       If c = #D200 Then G.P[w].n200 = G.P[w].n200 + 1
-      p_Log(who$ .. " drove " .. p_Name$(c) .. "  (" .. Str(G.P[w].km) .. " km)")
+      p_Log(who$ .. " drove " .. p_Name$(c) .. "  (" .. p_S$(G.P[w].km) .. " km)")
       Return(False)
    EndIf
 
@@ -301,13 +322,14 @@ Function p_Finish()
    Local msg$
    G.over = True
    If G.P[0].km = G.P[1].km
-      msg$ = "It's a draw at " .. Str(G.P[0].km) .. " km!"
+      msg$ = "It's a draw at " .. p_S$(G.P[0].km) .. " km!"
    ElseIf G.P[0].km > G.P[1].km
-      msg$ = "You win!  " .. Str(G.P[0].km) .. " km to " .. Str(G.P[1].km) .. " km."
+      msg$ = "You win!  " .. p_S$(G.P[0].km) .. " km to " .. p_S$(G.P[1].km) .. " km."
    Else
-      msg$ = "The Computer wins.  " .. Str(G.P[1].km) .. " km to " .. Str(G.P[0].km) .. " km."
+      msg$ = p_Who$(1) .. " wins.  " .. p_S$(G.P[1].km) .. " km to " .. p_S$(G.P[0].km) .. " km."
    EndIf
    p_Log("*** GAME OVER: " .. msg$)
+   If G.mode = 1 Then p_NetSend("LEAVE")   ; back to the server lobby
    p_Refresh()
    moai.Request("Game over", msg$, "OK")
 EndFunction
@@ -436,42 +458,64 @@ Function p_EndHumanTurn()
 EndFunction
 
 Function p_HumanPlay()
-   Local c, extra
+   Local c, extra, slot
    If G.over = True Then Return
+   If G.myturn = False
+      p_Log("It's not your turn yet.")
+      Return
+   EndIf
    If G.sel < 0 Or G.sel >= G.P[0].hn
       p_Log("Select a card in your hand first.")
       Return
    EndIf
-   c = G.P[0].hand[G.sel]
+   slot = G.sel
+   c = G.P[0].hand[slot]
    If p_CanPlay(0, c) = False
       p_Log("You can't play " .. p_Short$(c) .. " right now. Discard it?")
       Return
    EndIf
-   p_Remove(0, G.sel)
+   p_Remove(0, slot)
    extra = p_Apply(0, c)
+   If G.mode = 1 Then p_NetSend("MOVE P " .. slot)
    If p_CheckEnd() = True Then Return
    If extra = True
       p_Draw(0)
       p_Refresh()
       Return
    EndIf
-   p_Refresh()
-   p_EndHumanTurn()
+   If G.mode = 1
+      G.myturn = False
+      p_Refresh()
+   Else
+      p_Refresh()
+      p_EndHumanTurn()
+   EndIf
 EndFunction
 
 Function p_HumanDiscard()
-   Local c
+   Local c, slot
    If G.over = True Then Return
+   If G.myturn = False
+      p_Log("It's not your turn yet.")
+      Return
+   EndIf
    If G.sel < 0 Or G.sel >= G.P[0].hn
       p_Log("Select a card to discard first.")
       Return
    EndIf
-   c = G.P[0].hand[G.sel]
-   p_Remove(0, G.sel)
+   slot = G.sel
+   c = G.P[0].hand[slot]
+   p_Remove(0, slot)
    p_Log("You discarded " .. p_Short$(c))
+   If G.mode = 1 Then p_NetSend("MOVE D " .. slot)
    If p_CheckEnd() = True Then Return
-   p_Refresh()
-   p_EndHumanTurn()
+   If G.mode = 1
+      G.myturn = False
+      p_Refresh()
+   Else
+      p_Refresh()
+      p_EndHumanTurn()
+   EndIf
 EndFunction
 
 ; ============================================================================
@@ -515,17 +559,25 @@ Function p_SafetyText$(w)
    If G.P[w].saf[2] = True Then s$ = s$ .. "Puncture-Proof  "
    If G.P[w].saf[3] = True Then s$ = s$ .. "Right of Way  "
    If s$ = "" Then s$ = "(no safeties)"
-   Return("Safeties: " .. s$ .. "   |   200s: " .. Str(G.P[w].n200) .. "/2")
+   Return("Safeties: " .. s$ .. "   |   200s: " .. p_S$(G.P[w].n200) .. "/2")
 EndFunction
 
 Function p_Refresh()
    Local i, c, w, t$
    For w = 0 To 1
-      moai.Set("km" .. Str(w), "text", p_Bar$(G.P[w].km) .. "  " .. Str(G.P[w].km) .. " / 1000 km")
-      moai.Set("st" .. Str(w), "text", p_StatusText$(w))
-      moai.Set("sf" .. Str(w), "text", p_SafetyText$(w))
+      moai.Set("km" .. p_S$(w), "text", p_Bar$(G.P[w].km) .. "  " .. p_S$(G.P[w].km) .. " / 1000 km")
+      moai.Set("st" .. p_S$(w), "text", p_StatusText$(w))
+      moai.Set("sf" .. p_S$(w), "text", p_SafetyText$(w))
    Next
-   moai.Set("deckinfo", "text", "Draw pile: " .. Str(G.dn) .. " cards     Computer holds " .. Str(G.P[1].hn) .. " cards")
+   t$ = "Draw pile: " .. p_S$(G.dn) .. " cards     " .. G.oppname .. " holds " .. p_S$(G.P[1].hn) .. " cards"
+   If G.mode = 1 And G.over = False
+      If G.myturn = True
+         t$ = t$ .. "     >>> YOUR TURN <<<"
+      Else
+         t$ = t$ .. "     Waiting for " .. G.oppname .. "..."
+      EndIf
+   EndIf
+   moai.Set("deckinfo", "text", t$)
 
    moai.DoMethod("hand", "clear")
    For i = 0 To G.P[0].hn - 1
@@ -539,8 +591,12 @@ Function p_Refresh()
    G.sel = -1
 EndFunction
 
-Function p_NewGame()
+Function p_NewGameAI()
    Local w, i
+   If G.net = True Then p_NetSend("LEAVE")   ; leave a match / cancel a search
+   G.mode = 0
+   G.myturn = True
+   G.oppname = "Computer"
    G.P = {}
    For w = 0 To 1
       G.P[w] = p_NewPlayer()
@@ -554,12 +610,218 @@ Function p_NewGame()
    G.over = False
    G.sel = -1
    moai.DoMethod("log", "clear")
-   p_Log("New game! First to exactly 1000 km wins. You start - you need a GO card to get rolling.")
+   p_Log("New game vs the Computer! First to exactly 1000 km wins. You need a GO card to get rolling.")
    p_Refresh()
 EndFunction
 
+; ============================================================================
+;  ONLINE PLAY  (text protocol, one line per message, see server/PROTOCOL.md)
+; ============================================================================
+Function p_NetSend(s$)
+   If G.net = True Then SendData(#NETID, s$ .. "\n")
+EndFunction
+
+Function p_NetClose()
+   If G.net = True
+      CloseConnection(#NETID)
+      G.net = False
+   EndIf
+EndFunction
+
+Function p_FindMatch()
+   Local host$, port, name$, room$, err
+   room$ = p_Clean$(moai.Get("room", "text"))
+   If G.net = False
+      host$ = moai.Get("host", "text")
+      port = ToNumber(moai.Get("port", "text"))
+      name$ = p_Clean$(moai.Get("pname", "text"))
+      If name$ = "" Then name$ = "Player"
+      p_Log("Connecting to " .. host$ .. ":" .. p_S$(port) .. " ...")
+      ExitOnError(False)
+      OpenConnection(#NETID, host$, port)
+      err = GetLastError()
+      ExitOnError(True)
+      If err <> 0
+         p_Log("Could not connect to the server.")
+         Return
+      EndIf
+      G.net = True
+      G.rx = ""
+      p_NetSend("HELLO " .. name$)
+   EndIf
+   If room$ = ""
+      p_NetSend("FIND")
+   Else
+      p_NetSend("FIND " .. room$)
+   EndIf
+EndFunction
+
+Function p_StartNet(seat, opp$, csv$)
+   Local d, n, i, w
+   d, n = SplitStr(csv$, ",")
+   If n <> 106
+      p_Log("*** Server sent a bad deck - match cancelled.")
+      p_NetSend("LEAVE")
+      Return
+   EndIf
+   G.mode = 1
+   G.seat = seat
+   G.oppname = opp$
+   G.deck = {}
+   For i = 0 To n - 1
+      G.deck[i] = ToNumber(d[i])
+   Next
+   G.dn = n
+   G.P = {}
+   For w = 0 To 1
+      G.P[w] = p_NewPlayer()
+   Next
+   ; both clients deal in the same order: seat 0 first, then seat 1
+   For i = 1 To 6
+      If seat = 0
+         p_Draw(0)
+         p_Draw(1)
+      Else
+         p_Draw(1)
+         p_Draw(0)
+      EndIf
+   Next
+   G.over = False
+   G.sel = -1
+   moai.DoMethod("log", "clear")
+   p_Log("Match found! You are playing " .. opp$ .. ".")
+   If seat = 0
+      p_Draw(0)
+      G.myturn = True
+      p_Log("You go first.")
+   Else
+      G.myturn = False
+      p_Log(opp$ .. " goes first.")
+   EndIf
+   p_Refresh()
+EndFunction
+
+; start of my turn: draw, or pass if I have no cards left (empty pile)
+Function p_StartMyTurn()
+   p_Draw(0)
+   G.myturn = True
+   If G.P[0].hn = 0
+      p_Log("You have no cards left - passing.")
+      p_NetSend("MOVE X")
+      G.myturn = False
+   EndIf
+   p_Refresh()
+EndFunction
+
+; the opponent's move arrived
+Function p_OppMove(kind$, slot)
+   Local c, extra, ok
+   If G.over = True Then Return
+   If G.mode <> 1 Then Return
+   If G.myturn = True Then Return
+   p_Draw(1)
+   extra = False
+   ok = True
+   If kind$ = "X"
+      p_Log(G.oppname .. " has no cards and passes.")
+   ElseIf slot < 0 Or slot >= G.P[1].hn
+      ok = False
+   Else
+      c = G.P[1].hand[slot]
+      If kind$ = "P"
+         If p_CanPlay(1, c) = False Then ok = False
+      ElseIf kind$ <> "D"
+         ok = False
+      EndIf
+      If ok = True
+         p_Remove(1, slot)
+         If kind$ = "P"
+            extra = p_Apply(1, c)
+         Else
+            p_Log(G.oppname .. " discarded " .. p_Short$(c))
+         EndIf
+      EndIf
+   EndIf
+   If ok = False
+      G.over = True
+      p_Log("*** Out of sync with the opponent - game aborted.")
+      p_NetSend("LEAVE")
+      p_Refresh()
+      Return
+   EndIf
+   If p_CheckEnd() = True Then Return
+   If extra = True
+      p_Refresh()   ; safety card: the opponent moves again
+      Return
+   EndIf
+   p_StartMyTurn()
+EndFunction
+
+Function p_NetLine(line$)
+   Local f, c, cmd$, slot
+   f, c = SplitStr(line$, " ")
+   If c < 2
+      cmd$ = line$
+   Else
+      cmd$ = f[0]
+   EndIf
+   Switch cmd$
+   Case "WELCOME":
+      p_Log("Connected to the server.")
+   Case "WAIT":
+      p_Log("Searching for an opponent... (press New game to cancel)")
+   Case "MATCH":
+      If c >= 4 Then p_StartNet(ToNumber(f[1]), f[2], f[3])
+   Case "OPP":
+      slot = -1
+      If c >= 3 Then slot = ToNumber(f[2])
+      If c >= 2 Then p_OppMove(f[1], slot)
+   Case "OPPLEFT":
+      If G.mode = 1 And G.over = False
+         G.over = True
+         p_Log("*** " .. G.oppname .. " left the game.")
+         p_Refresh()
+         moai.Request("Game over", G.oppname .. " left the game.", "OK")
+      EndIf
+   Case "ERR":
+      p_Log("Server: " .. line$)
+   EndSwitch
+EndFunction
+
+Function p_NetProcess()
+   Local parts, n, i
+   parts, n = SplitStr(G.rx, "\n")
+   If n < 2 Then Return       ; no complete line yet
+   For i = 0 To n - 2
+      p_NetLine(parts[i])
+   Next
+   If G.net = True Then G.rx = parts[n - 1]
+EndFunction
+
+Function p_NetEvent(msg)
+   Local a$, len
+   Switch msg.action
+   Case "OnReceiveData":
+      a$, len = ReceiveData(msg.id, #RECEIVEALL, False)
+      a$ = ReplaceStr(a$, "\r", "")
+      G.rx = G.rx .. a$
+      p_NetProcess()
+   Case "OnDisconnect":
+      CloseConnection(msg.id)
+      G.net = False
+      G.rx = ""
+      If G.mode = 1 And G.over = False
+         G.over = True
+         p_Log("*** Connection to the server lost.")
+         p_Refresh()
+      Else
+         p_Log("Disconnected from the server.")
+      EndIf
+   EndSwitch
+EndFunction
+
 Function p_Rules()
-   moai.Request("Mille Bornes - Rules", ..
+   moai.Request("HollyBornes - Rules", ..
       "Goal: be the first to travel exactly 1000 km.\n\n" .. ..
       "Each turn you draw a card, then play or discard one.\n\n" .. ..
       "DISTANCE cards move you, but only while rolling. You need a GO card to start, " .. ..
@@ -572,16 +834,20 @@ Function p_Rules()
       "SAFETIES give permanent protection and an extra turn. Right of Way makes " .. ..
       "you immune to Stop and Speed Limit and means you never need GO.\n\n" .. ..
       "If the draw pile runs out, whoever has gone farthest wins.\n\n" .. ..
+      "ONLINE: fill in the server, your name and (optionally) a room code, then " .. ..
+      "press Find opponent. Two players who use the same room code are matched " .. ..
+      "together; with no code you are matched with the next random player.\n\n" .. ..
       "(Simplified: no coup fourre, no scoring bonuses.)", "OK")
 EndFunction
 
 Function p_About()
-   moai.Request("About Mille Bornes", ..
-      "Mille Bornes 1.0\n\n" .. ..
-      "The classic French road-race card game,\n" .. ..
+   moai.Request("About HollyBornes", ..
+      "HollyBornes 1.1\n\n" .. ..
+      "A Hollywood take on the classic French road-race card game Mille Bornes,\n" .. ..
       "written in Hollywood with RapaGUI.\n\n" .. ..
-      "Play against the Computer and be the first\n" .. ..
-      "to travel exactly 1000 km.", "OK")
+      "Play against the Computer, or online against\n" .. ..
+      "another player through the matchmaking server,\n" .. ..
+      "and be the first to travel exactly 1000 km.", "OK")
 EndFunction
 
 Function p_Event(msg)
@@ -593,7 +859,9 @@ Function p_Event(msg)
       If msg.attribute = "Selected"
          Switch msg.id
          Case "mnew":
-            p_NewGame()
+            p_NewGameAI()
+         Case "mfind":
+            p_FindMatch()
          Case "mrules":
             p_Rules()
          Case "mabout":
@@ -620,7 +888,12 @@ Function p_Event(msg)
          Case "bdiscard":
             p_HumanDiscard()
          Case "bnew":
-            p_NewGame()
+            p_NewGameAI()
+         Case "bfind":
+            p_FindMatch()
+         Case "bdisc":
+            p_NewGameAI()
+            p_NetClose()
          EndSwitch
       EndIf
    EndSwitch
@@ -629,14 +902,13 @@ EndFunction
 ; ============================================================================
 ;  MAIN
 ; ============================================================================
-SeedRnd(GetTimer(1))
-
 moai.CreateApp([[
 <?xml version="1.0" encoding="iso-8859-1"?>
 <application id="app">
    <menubar id="mb">
       <menu title="Game">
-         <item id="mnew">New game</item>
+         <item id="mnew">New game vs computer</item>
+         <item id="mfind">Find online opponent</item>
          <item id="mrules">Rules...</item>
          <item id="mabout">About...</item>
          <item/>
@@ -644,7 +916,7 @@ moai.CreateApp([[
       </menu>
    </menubar>
 
-   <window id="win" title="Mille Bornes" menubar="mb" notify="closerequest">
+   <window id="win" title="HollyBornes" menubar="mb" notify="closerequest">
       <vgroup>
          <hgroup>
             <vgroup frame="true" frametitle="You">
@@ -652,7 +924,7 @@ moai.CreateApp([[
                <text id="st0"> </text>
                <text id="sf0"> </text>
             </vgroup>
-            <vgroup frame="true" frametitle="Computer">
+            <vgroup frame="true" frametitle="Opponent">
                <text id="km1"> </text>
                <text id="st1"> </text>
                <text id="sf1"> </text>
@@ -672,6 +944,25 @@ moai.CreateApp([[
             </hgroup>
          </vgroup>
 
+         <vgroup frame="true" frametitle="Play online (2 players)">
+            <hgroup>
+               <label>Server:</label>
+               <textentry id="host">localhost</textentry>
+               <label>Port:</label>
+               <textentry id="port">5555</textentry>
+            </hgroup>
+            <hgroup>
+               <label>Name:</label>
+               <textentry id="pname">Player</textentry>
+               <label>Room code:</label>
+               <textentry id="room"/>
+            </hgroup>
+            <hgroup>
+               <button id="bfind">Find opponent</button>
+               <button id="bdisc">Disconnect</button>
+            </hgroup>
+         </vgroup>
+
          <vgroup frame="true" frametitle="Game log (newest first)">
             <listview id="log">
                <column/>
@@ -682,9 +973,9 @@ moai.CreateApp([[
 </application>
 ]])
 
-InstallEventHandler({RapaGUI = p_Event})
+InstallEventHandler({RapaGUI = p_Event, OnReceiveData = p_NetEvent, OnDisconnect = p_NetEvent})
 
-p_NewGame()
+p_NewGameAI()
 
 Repeat
    WaitEvent
