@@ -1,6 +1,6 @@
 # HollyBornes
 
-A Hollywood take on the classic French road-race card game **Mille Bornes**, written in [Hollywood](https://www.hollywood-mal.com) with the [RapaGUI](https://www.hollywood-mal.com/rapagui.html) plugin. Be the first to travel exactly 1000 km, against the computer or against another person online.
+A Hollywood take on the classic French road-race card game **Mille Bornes**, written in [Hollywood](https://www.hollywood-mal.com) with the [RapaGUI](https://www.hollywood-mal.com/rapagui.html) plugin. Be the first to travel exactly 1000 km, against the computer or against another person online. With an optional account server your games are recorded and you can make friends.
 
 ## Requirements
 
@@ -28,6 +28,20 @@ make
 
 The port is optional and defaults to 5555. Run it on a machine both players can reach, and open the port in the firewall if the players are on different networks.
 
+Server options:
+
+| Option | Meaning |
+|--------|---------|
+| `-d datadir` | Turn on **accounts**: logins, recorded games, friends and a leaderboard, stored in `datadir` |
+| `--require-login` | With `-d`: only registered players may connect (no guests) |
+| `-p port` | Same as the positional port |
+| `--selftest` | Check the built-in password hashing and exit |
+
+```
+./hollyserver 5555 -d ./hollydata                  # accounts, guests still allowed
+./hollyserver 5555 -d ./hollydata --require-login  # accounts only
+```
+
 ### 2. Connect from the game
 
 In the **Play online** panel of the game window:
@@ -36,10 +50,11 @@ In the **Play online** panel of the game window:
 |-------|---------|
 | Server | Host name or IP address of the machine running `hollyserver` (`localhost` for testing) |
 | Port | The server port (default 5555) |
-| Name | The name your opponent sees |
+| Name | The name your opponent sees (your account name if you use a password) |
+| Password | Optional. Leave it empty to play as a **guest**. With a password you log in to your account, or create it if the name is new. Needs a server started with `-d`. |
 | Room code | Optional. Two players who enter the same code are matched with each other, which is handy for playing with a friend. Leave it empty to be matched with the next random player. |
 
-Press **Find opponent**. The log shows "Searching for an opponent..." until someone else joins, then the match starts automatically. The line under the player panels shows whose turn it is.
+Press **Find opponent** (or **Log in** to connect without searching). The log shows "Searching for an opponent..." until someone else joins, then the match starts automatically. The line under the player panels shows whose turn it is.
 
 - Seat order is random. The player in seat 0 moves first.
 - **New game** (or the menu item) leaves the match or cancels the search and starts a game against the computer.
@@ -47,6 +62,24 @@ Press **Find opponent**. The log shows "Searching for an opponent..." until some
 - If your opponent leaves or loses their connection, the game ends and you can search again on the same connection.
 
 To test on one computer, start the server, then run two copies of the game with `localhost` and the same (or an empty) room code.
+
+## Accounts, stats and friends
+
+These need a server started with `-d` and a password in the Online panel. Guests can still play, but nothing is recorded for them.
+
+**Accounts.** The first time you log in with a new name, the account is created with the password you typed. Names are not case-sensitive. After that, the same name and password log you back in from any computer. A registered name cannot be used by guests.
+
+**Recorded games.** When an online game ends, both players' games report the final distances and the server records the result: games played, won, lost, drawn and forfeits, plus your last 10 games.
+
+- Leaving or disconnecting in the middle of a game counts as a **forfeit** (a loss for you, a win for your opponent).
+- If the two reports disagree, the game counts as played but has no winner.
+- Games against the computer are not recorded.
+
+**Stats, History and Leaderboard** buttons show the totals and last 10 games of yourself, or of any player whose name you type in the box next to **Add friend**, and the top 10 players by wins.
+
+**Friends.** Type a player's name next to **Add friend** and press the button to send a request. The other player sees it in their Friends list and presses **Accept** (or **Remove / Decline**). If you both ask each other you become friends at once. The list shows whether each friend is online, queued or playing, and you get a message when a friend comes online. To play a friend, both of you enter the same **Room code** and press Find opponent.
+
+**Safety notes.** The connection is not encrypted, so your password travels in clear text. Use a password you don't use anywhere else, or tunnel the connection (for example with `ssh -L 5555:localhost:5555 yourserver`). The server stores only a salted hash. Results are reported by the players' game clients, so two people working together could fake results; this is meant for friendly play.
 
 ## How to play
 
@@ -102,14 +135,14 @@ This version leaves out two rules of the original game:
 ## Menu
 
 - **Game > New game vs computer** starts a game against the computer.
-- **Game > Find online opponent** connects (if needed) and joins the queue.
+- **Game > Find online opponent** connects (if needed), logs you in, and joins the queue.
 - **Game > Rules...** shows a summary of the rules.
 - **Game > About...** shows version information.
 - **Game > Quit** exits the program.
 
 ## How the online mode works
 
-The server is only a matchmaker and relay. When two players are paired it shuffles the deck once and sends the same card order to both. After that, each player's moves (play slot 3, discard slot 5, ...) are forwarded to the opponent. Both copies of the game run the same rules on the same deck and stay in step, and each client checks that its opponent's moves are legal. The full message format is in [`server/PROTOCOL.md`](server/PROTOCOL.md).
+The server is a matchmaker and relay (and, in account mode, a record keeper). When two players are paired it shuffles the deck once and sends the same card order to both. After that, each player's moves (play slot 3, discard slot 5, ...) are forwarded to the opponent. Both copies of the game run the same rules on the same deck and stay in step, and each client checks that its opponent's moves are legal. The full message format is in [`server/PROTOCOL.md`](server/PROTOCOL.md).
 
 Because both clients hold the full deck order, a modified client could peek at the opponent's cards. This is fine for games among friends, but it is not cheat-proof.
 
@@ -118,10 +151,13 @@ Because both clients hold the full deck order, a modified client could peek at t
 | File | Description |
 |------|-------------|
 | `HollyBornes.hws` | The complete game: rules engine, computer player, online client and RapaGUI interface |
-| `server/hollyserver.c` | The matchmaking and relay server (single-threaded C, `poll()` based) |
-| `server/Makefile` | `make` builds the server, `make test` runs the protocol tests |
-| `server/test_server.py` | Protocol tests: matchmaking, rooms, relaying, leaving, disconnects and abuse |
-| `server/PROTOCOL.md` | The text protocol spoken between game and server |
+| `server/hollyserver.c` | The matchmaking, relay and account server (single-threaded C, `poll()` based) |
+| `server/Makefile` | `make` builds the server, `make test` runs all tests |
+| `server/test_server.py` | Protocol tests for matchmaking, rooms, relaying, leaving, disconnects and abuse |
+| `server/test_accounts.py` | Tests for logins, recorded games, forfeits, friends, leaderboard and persistence across restarts |
+| `server/PROTOCOL.md` | The text protocol spoken between game and server, and the storage format |
+
+When accounts are on, the data directory holds `accounts.db` (accounts, stats, friends, recent games) and `games.log` (one line per finished game). Back these up if you care about them.
 
 ## Notes
 

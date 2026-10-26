@@ -9,7 +9,7 @@
 @REQUIRE "RapaGUI"
 
 @APPTITLE "HollyBornes"
-@APPVERSION "$VER: HollyBornes 1.1 (25.10.2026)"
+@APPVERSION "$VER: HollyBornes 1.2 (26.10.2026)"
 @APPAUTHOR "You"
 @APPCOPYRIGHT "Public domain"
 @APPDESCRIPTION "The classic French road-race card game"
@@ -51,6 +51,17 @@ G.seat = 0
 G.rx = ""             ; receive buffer
 G.oppname = "Computer"
 G.sel = -1
+G.welcomed = False    ; server accepted our HELLO / LOGIN
+G.login = ""          ; account name when logged in with a password
+G.fn = {}             ; friends panel: names, kinds (0 friend, 1 request), status
+G.ft = {}
+G.fs = {}
+G.fcnt = 0
+G.sn = {}             ; what the friends list currently shows (for selection)
+G.sk = {}
+G.sc = 0
+G.fsel = -1
+G.pop = ""            ; lines collected for popups (history, leaderboard)
 
 ; ============================================================================
 ;  CARD DATABASE
@@ -329,7 +340,10 @@ Function p_Finish()
       msg$ = p_Who$(1) .. " wins.  " .. p_S$(G.P[1].km) .. " km to " .. p_S$(G.P[0].km) .. " km."
    EndIf
    p_Log("*** GAME OVER: " .. msg$)
-   If G.mode = 1 Then p_NetSend("LEAVE")   ; back to the server lobby
+   If G.mode = 1
+      p_NetSend("RESULT " .. G.P[0].km .. " " .. G.P[1].km)
+      p_NetSend("LEAVE")   ; back to the server lobby
+   EndIf
    p_Refresh()
    moai.Request("Game over", msg$, "OK")
 EndFunction
@@ -626,16 +640,42 @@ Function p_NetClose()
       CloseConnection(#NETID)
       G.net = False
    EndIf
+   p_ResetSession()
+EndFunction
+
+Function p_ResetSession()
+   G.welcomed = False
+   G.login = ""
+   G.fcnt = 0
+   G.sc = 0
+   G.fsel = -1
+   G.pop = ""
+   moai.DoMethod("friends", "clear")
+EndFunction
+
+Function p_SendIntro()
+   Local name$, pw$
+   name$ = p_Clean$(moai.Get("pname", "text"))
+   pw$ = moai.Get("pass", "text")
+   If name$ = "" Then name$ = "Player"
+   If pw$ = ""
+      p_NetSend("HELLO " .. name$)       ; guest: no stats, no friends
+   Else
+      p_NetSend("LOGIN " .. name$ .. " " .. pw$)
+   EndIf
 EndFunction
 
 Function p_FindMatch()
-   Local host$, port, name$, room$, err
+   Local host$, port, room$, err, pw$
    room$ = p_Clean$(moai.Get("room", "text"))
+   pw$ = moai.Get("pass", "text")
+   If ReplaceStr(pw$, " ", "") <> pw$
+      p_Log("The password must not contain spaces.")
+      Return
+   EndIf
    If G.net = False
       host$ = moai.Get("host", "text")
       port = ToNumber(moai.Get("port", "text"))
-      name$ = p_Clean$(moai.Get("pname", "text"))
-      If name$ = "" Then name$ = "Player"
       p_Log("Connecting to " .. host$ .. ":" .. p_S$(port) .. " ...")
       ExitOnError(False)
       OpenConnection(#NETID, host$, port)
@@ -647,13 +687,90 @@ Function p_FindMatch()
       EndIf
       G.net = True
       G.rx = ""
-      p_NetSend("HELLO " .. name$)
+      p_ResetSession()
    EndIf
+   If G.welcomed = False Then p_SendIntro()
    If room$ = ""
       p_NetSend("FIND")
    Else
       p_NetSend("FIND " .. room$)
    EndIf
+EndFunction
+
+; ---- friends panel --------------------------------------------------------
+Function p_NeedLogin()
+   If G.net = True And G.login <> "" Then Return(True)
+   p_Log("Friends need an account: enter a name and password in the Online panel and press Find opponent (or press Log in).")
+   Return(False)
+EndFunction
+
+Function p_FAdd(n$, kind, st$)
+   G.fn[G.fcnt] = n$
+   G.ft[G.fcnt] = kind
+   G.fs[G.fcnt] = st$
+   G.fcnt = G.fcnt + 1
+EndFunction
+
+Function p_ShowFriends()
+   Local i, t$
+   moai.DoMethod("friends", "clear")
+   For i = 0 To G.fcnt - 1
+      If G.ft[i] = 0
+         t$ = G.fn[i] .. "   [" .. G.fs[i] .. "]"
+      Else
+         t$ = "REQUEST: " .. G.fn[i] .. " wants to be your friend"
+      EndIf
+      moai.DoMethod("friends", "insert", "bottom", t$)
+      G.sn[i] = G.fn[i]
+      G.sk[i] = G.ft[i]
+   Next
+   G.sc = G.fcnt
+   G.fcnt = 0
+   G.fsel = -1
+EndFunction
+
+Function p_ResWord$(r$)
+   Switch r$
+   Case "W": Return("won")
+   Case "L": Return("lost")
+   Case "D": Return("draw")
+   Case "F": Return("forfeited")
+   Case "X": Return("disputed")
+   EndSwitch
+   Return(r$)
+EndFunction
+
+Function p_ShowPopup(title$, empty$)
+   If G.pop = "" Then G.pop = empty$ .. "\n"
+   moai.Request(title$, G.pop, "OK")
+   G.pop = ""
+EndFunction
+
+Function p_Connect()
+   ; connect and log in without searching for a match
+   Local host$, port, err, pw$
+   pw$ = moai.Get("pass", "text")
+   If ReplaceStr(pw$, " ", "") <> pw$
+      p_Log("The password must not contain spaces.")
+      Return
+   EndIf
+   If G.net = False
+      host$ = moai.Get("host", "text")
+      port = ToNumber(moai.Get("port", "text"))
+      p_Log("Connecting to " .. host$ .. ":" .. p_S$(port) .. " ...")
+      ExitOnError(False)
+      OpenConnection(#NETID, host$, port)
+      err = GetLastError()
+      ExitOnError(True)
+      If err <> 0
+         p_Log("Could not connect to the server.")
+         Return
+      EndIf
+      G.net = True
+      G.rx = ""
+      p_ResetSession()
+   EndIf
+   If G.welcomed = False Then p_SendIntro()
 EndFunction
 
 Function p_StartNet(seat, opp$, csv$)
@@ -745,6 +862,7 @@ Function p_OppMove(kind$, slot)
    If ok = False
       G.over = True
       p_Log("*** Out of sync with the opponent - game aborted.")
+      p_NetSend("RESULT " .. G.P[0].km .. " " .. G.P[1].km)
       p_NetSend("LEAVE")
       p_Refresh()
       Return
@@ -767,7 +885,14 @@ Function p_NetLine(line$)
    EndIf
    Switch cmd$
    Case "WELCOME":
+      G.welcomed = True
       p_Log("Connected to the server.")
+   Case "LOGGEDIN":
+      If c >= 8
+         G.login = f[1]
+         p_Log("Logged in as " .. f[1] .. ": " .. f[2] .. " games, " .. f[3] .. " won, " .. f[4] .. " lost.")
+         p_NetSend("FRIENDS")
+      EndIf
    Case "WAIT":
       p_Log("Searching for an opponent... (press New game to cancel)")
    Case "MATCH":
@@ -783,6 +908,40 @@ Function p_NetLine(line$)
          p_Refresh()
          moai.Request("Game over", G.oppname .. " left the game.", "OK")
       EndIf
+   Case "FRIEND":
+      If c >= 3 Then p_FAdd(f[1], 0, f[2])
+   Case "REQUEST":
+      If c >= 2 Then p_FAdd(f[1], 1, "")
+   Case "ENDFRIENDS":
+      p_ShowFriends()
+   Case "FRIENDREQ":
+      If c >= 2 Then p_Log(f[1] .. " sent you a friend request.")
+      p_NetSend("FRIENDS")
+   Case "FRIENDADDED":
+      If c >= 2 Then p_Log("You and " .. f[1] .. " are now friends.")
+      p_NetSend("FRIENDS")
+   Case "FRIENDREMOVED":
+      If c >= 2 Then p_Log(f[1] .. " removed you from their friends.")
+      p_NetSend("FRIENDS")
+   Case "FRIENDON":
+      If c >= 2 Then p_Log("Your friend " .. f[1] .. " is online.")
+      p_NetSend("FRIENDS")
+   Case "FRIENDOFF":
+      p_NetSend("FRIENDS")
+   Case "STATS":
+      If c >= 7
+         moai.Request("Stats: " .. f[1], "Games played: " .. f[2] .. "\nWon: " .. f[3] .. "\nLost: " .. f[4] .. "\nDrawn: " .. f[5] .. "\nForfeits: " .. f[6], "OK")
+      EndIf
+   Case "GAME":
+      If c >= 6 Then G.pop = G.pop .. f[3] .. " km to " .. f[4] .. " km against " .. f[2] .. " - " .. p_ResWord$(f[5]) .. "\n"
+   Case "ENDHISTORY":
+      If c >= 2 Then p_ShowPopup("Recent games: " .. f[1], "No games played yet.")
+   Case "LEADER":
+      If c >= 5 Then G.pop = G.pop .. f[1] .. ". " .. f[2] .. "  -  " .. f[3] .. " won of " .. f[4] .. " played\n"
+   Case "ENDLEADERS":
+      p_ShowPopup("Leaderboard", "No games recorded yet.")
+   Case "OK":
+      p_Log(line$)
    Case "ERR":
       p_Log("Server: " .. line$)
    EndSwitch
@@ -810,6 +969,7 @@ Function p_NetEvent(msg)
       CloseConnection(msg.id)
       G.net = False
       G.rx = ""
+      p_ResetSession()
       If G.mode = 1 And G.over = False
          G.over = True
          p_Log("*** Connection to the server lost.")
@@ -834,6 +994,9 @@ Function p_Rules()
       "SAFETIES give permanent protection and an extra turn. Right of Way makes " .. ..
       "you immune to Stop and Speed Limit and means you never need GO.\n\n" .. ..
       "If the draw pile runs out, whoever has gone farthest wins.\n\n" .. ..
+      "ACCOUNTS: if the server has accounts turned on, enter a password to log in " .. ..
+      "(a new name creates the account). Your online games are then recorded and " .. ..
+      "you can add friends.\n\n" .. ..
       "ONLINE: fill in the server, your name and (optionally) a room code, then " .. ..
       "press Find opponent. Two players who use the same room code are matched " .. ..
       "together; with no code you are matched with the next random player.\n\n" .. ..
@@ -842,12 +1005,69 @@ EndFunction
 
 Function p_About()
    moai.Request("About HollyBornes", ..
-      "HollyBornes 1.1\n\n" .. ..
+      "HollyBornes 1.2\n\n" .. ..
       "A Hollywood take on the classic French road-race card game Mille Bornes,\n" .. ..
       "written in Hollywood with RapaGUI.\n\n" .. ..
       "Play against the Computer, or online against\n" .. ..
       "another player through the matchmaking server,\n" .. ..
       "and be the first to travel exactly 1000 km.", "OK")
+EndFunction
+
+Function p_FriendAdd()
+   Local n$
+   If p_NeedLogin() = False Then Return
+   n$ = p_Clean$(moai.Get("fname", "text"))
+   If n$ = ""
+      p_Log("Type the player's name next to Add friend first.")
+      Return
+   EndIf
+   p_NetSend("FRIEND ADD " .. n$)
+EndFunction
+
+; act on the selected entry of the friends list.
+; ACCEPT only works on requests (kind 1); REMOVE removes a friend (kind 0)
+; or declines a request (kind 1).
+Function p_FriendSelected(what$, onlykind)
+   Local i
+   If p_NeedLogin() = False Then Return
+   i = G.fsel
+   If i < 0 Or i >= G.sc
+      p_Log("Select someone in the friends list first.")
+      Return
+   EndIf
+   If what$ = "ACCEPT"
+      If G.sk[i] <> 1
+         p_Log("Select a friend request to accept.")
+         Return
+      EndIf
+      p_NetSend("FRIEND ACCEPT " .. G.sn[i])
+   Else
+      If G.sk[i] = 1
+         p_NetSend("FRIEND DECLINE " .. G.sn[i])
+      Else
+         p_NetSend("FRIEND REMOVE " .. G.sn[i])
+      EndIf
+   EndIf
+   p_NetSend("FRIENDS")
+EndFunction
+
+; STATS / HISTORY of the name in the friends box, or of yourself if it is empty
+Function p_AskPlayer(cmd$)
+   Local n$
+   If G.net = False
+      p_Log("Connect to a server first.")
+      Return
+   EndIf
+   n$ = p_Clean$(moai.Get("fname", "text"))
+   If n$ = "" And G.login = ""
+      p_Log("Log in, or type a player's name in the friends box.")
+      Return
+   EndIf
+   If n$ = ""
+      p_NetSend(cmd$)
+   Else
+      p_NetSend(cmd$ .. " " .. n$)
+   EndIf
 EndFunction
 
 Function p_Event(msg)
@@ -879,6 +1099,13 @@ Function p_Event(msg)
             G.sel = -1
          EndIf
       EndIf
+      If msg.id = "friends" And msg.attribute = "Active"
+         If GetType(msg.triggervalue) = #NUMBER
+            G.fsel = msg.triggervalue
+         Else
+            G.fsel = -1
+         EndIf
+      EndIf
 
    Case "Button":
       If msg.attribute = "Pressed"
@@ -894,6 +1121,26 @@ Function p_Event(msg)
          Case "bdisc":
             p_NewGameAI()
             p_NetClose()
+         Case "bconn":
+            p_Connect()
+         Case "bfadd":
+            p_FriendAdd()
+         Case "bfaccept":
+            p_FriendSelected("ACCEPT", 1)
+         Case "bfremove":
+            p_FriendSelected("REMOVE", 0)
+         Case "bfrefresh":
+            If p_NeedLogin() = True Then p_NetSend("FRIENDS")
+         Case "bstats":
+            p_AskPlayer("STATS")
+         Case "bhist":
+            p_AskPlayer("HISTORY")
+         Case "bleaders":
+            If G.net = True
+               p_NetSend("LEADERS")
+            Else
+               p_Log("Connect to a server first.")
+            EndIf
          EndSwitch
       EndIf
    EndSwitch
@@ -944,24 +1191,51 @@ moai.CreateApp([[
             </hgroup>
          </vgroup>
 
-         <vgroup frame="true" frametitle="Play online (2 players)">
-            <hgroup>
-               <label>Server:</label>
-               <textentry id="host">localhost</textentry>
-               <label>Port:</label>
-               <textentry id="port">5555</textentry>
-            </hgroup>
-            <hgroup>
-               <label>Name:</label>
-               <textentry id="pname">Player</textentry>
-               <label>Room code:</label>
-               <textentry id="room"/>
-            </hgroup>
-            <hgroup>
-               <button id="bfind">Find opponent</button>
-               <button id="bdisc">Disconnect</button>
-            </hgroup>
-         </vgroup>
+         <hgroup>
+            <vgroup frame="true" frametitle="Play online (2 players)">
+               <hgroup>
+                  <label>Server:</label>
+                  <textentry id="host">localhost</textentry>
+                  <label>Port:</label>
+                  <textentry id="port">5555</textentry>
+               </hgroup>
+               <hgroup>
+                  <label>Name:</label>
+                  <textentry id="pname">Player</textentry>
+                  <label>Password:</label>
+                  <textentry id="pass" password="1"/>
+               </hgroup>
+               <hgroup>
+                  <label>Room code:</label>
+                  <textentry id="room"/>
+               </hgroup>
+               <hgroup>
+                  <button id="bfind">Find opponent</button>
+                  <button id="bconn">Log in</button>
+                  <button id="bdisc">Disconnect</button>
+               </hgroup>
+            </vgroup>
+
+            <vgroup frame="true" frametitle="Friends (needs a password login)">
+               <listview id="friends" notify="active">
+                  <column/>
+               </listview>
+               <hgroup>
+                  <textentry id="fname"/>
+                  <button id="bfadd">Add friend</button>
+               </hgroup>
+               <hgroup>
+                  <button id="bfaccept">Accept</button>
+                  <button id="bfremove">Remove / Decline</button>
+                  <button id="bfrefresh">Refresh</button>
+               </hgroup>
+               <hgroup>
+                  <button id="bstats">Stats</button>
+                  <button id="bhist">History</button>
+                  <button id="bleaders">Leaderboard</button>
+               </hgroup>
+            </vgroup>
+         </hgroup>
 
          <vgroup frame="true" frametitle="Game log (newest first)">
             <listview id="log">
