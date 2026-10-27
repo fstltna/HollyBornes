@@ -5,7 +5,7 @@ A Hollywood take on the classic French road-race card game **Mille Bornes**, wri
 ## Requirements
 
 - [Hollywood](https://www.hollywood-mal.com) 9.0 or later
-- The [RapaGUI](https://www.hollywood-mal.com/rapagui.html) plugin, installed so Hollywood can find it
+- The [RapaGUI](https://www.hollywood-mal.com/rapagui.html) plugin (`rapagui.hwp`), installed so Hollywood can find it. The script loads it with `@REQUIRE "rapagui.hwp"` (see Troubleshooting).
 - For online play: a running matchmaking server (see below). Building it needs a C compiler and POSIX sockets (Linux, macOS, BSD, or WSL on Windows).
 
 ## Running the game
@@ -159,9 +159,34 @@ Because both clients hold the full deck order, a modified client could peek at t
 
 When accounts are on, the data directory holds `accounts.db` (accounts, stats, friends, recent games) and `games.log` (one line per finished game). Back these up if you care about them.
 
+## Troubleshooting
+
+**"Loading plugin RapaGUI...failed"**
+
+Hollywood could not load the RapaGUI plugin. Run the script from a terminal or command prompt to see the reason, then check:
+
+- The plugin is installed: `rapagui.hwp` in Hollywood's `Plugins` folder, or next to the script or executable.
+- It matches your Hollywood: same platform and the same 32-bit or 64-bit build.
+- The `@REQUIRE` line at the top of `HollyBornes.hws` uses the file name, `@REQUIRE "rapagui.hwp"`. On Linux, where file names are case-sensitive, the plain name `"RapaGUI"` can fail to load the plugin.
+- On Linux, the GTK libraries are installed. The `gtk3` build of RapaGUI is the most compatible; the "webview" builds need extra components.
+- On Hollywood 11, if the plugin is installed in the global plugins folder, add `@OPTIONS {GlobalPlugins = True}` above the `@REQUIRE` line.
+- On macOS, a freshly downloaded plugin may be blocked by the quarantine flag.
+
+**Cannot connect to the server**
+
+Check that `hollyserver` is running, that the Server and Port fields match, and that the port is open in the firewall if you are connecting across networks.
+
+**"Wrong password" or "that name is registered"**
+
+Account names are not case-sensitive, and a registered name cannot be used by guests. If you forgot the password, the account can only be reset by deleting its `A` line (and any lines naming it) from `accounts.db` while the server is stopped.
+
+**Online game ends with "Out of sync"**
+
+Both players must run the same version of the game. If the message appears with matching versions, please report it, along with the log text.
+
 ## Notes
 
-The GUI is built with RapaGUI's XML layout system (`moai.CreateApp`) and handles events through event handlers for RapaGUI and network events. If you run into problems, check that the RapaGUI plugin is installed correctly and that you are using a recent Hollywood version.
+The GUI is built with RapaGUI's XML layout system (`moai.CreateApp`) and handles events through event handlers for RapaGUI and network events.
 
 ## License
 

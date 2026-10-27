@@ -6,7 +6,7 @@
 ; Run with:  Hollywood HollyBornes.hws      (or compile it to an executable)
 ; ============================================================================
 
-@REQUIRE "RapaGUI"
+@REQUIRE "rapagui.hwp"
 
 @APPTITLE "HollyBornes"
 @APPVERSION "$VER: HollyBornes 1.2 (26.10.2026)"
@@ -958,10 +958,10 @@ Function p_NetProcess()
 EndFunction
 
 Function p_NetEvent(msg)
-   Local a$, len
+   Local a$, nbytes
    Switch msg.action
    Case "OnReceiveData":
-      a$, len = ReceiveData(msg.id, #RECEIVEALL, False)
+      a$, nbytes = ReceiveData(msg.id, #RECEIVEALL, False)
       a$ = ReplaceStr(a$, "\r", "")
       G.rx = G.rx .. a$
       p_NetProcess()
@@ -981,36 +981,40 @@ Function p_NetEvent(msg)
 EndFunction
 
 Function p_Rules()
-   moai.Request("HollyBornes - Rules", ..
-      "Goal: be the first to travel exactly 1000 km.\n\n" .. ..
-      "Each turn you draw a card, then play or discard one.\n\n" .. ..
-      "DISTANCE cards move you, but only while rolling. You need a GO card to start, " .. ..
-      "and again after every hazard is repaired. Only two 200 km cards per game. " .. ..
-      "Under a SPEED LIMIT you may only play 25 or 50 km.\n\n" .. ..
-      "HAZARDS (Accident, Out of Gas, Flat Tire, Stop) can only be played on a " .. ..
-      "rolling opponent; Speed Limit can be played any time.\n\n" .. ..
-      "REMEDIES: Repairs, Gasoline, Spare Tire fix their hazard (then you need GO). " .. ..
-      "GO fixes Stop. End of Limit removes the speed limit.\n\n" .. ..
-      "SAFETIES give permanent protection and an extra turn. Right of Way makes " .. ..
-      "you immune to Stop and Speed Limit and means you never need GO.\n\n" .. ..
-      "If the draw pile runs out, whoever has gone farthest wins.\n\n" .. ..
-      "ACCOUNTS: if the server has accounts turned on, enter a password to log in " .. ..
-      "(a new name creates the account). Your online games are then recorded and " .. ..
-      "you can add friends.\n\n" .. ..
-      "ONLINE: fill in the server, your name and (optionally) a room code, then " .. ..
-      "press Find opponent. Two players who use the same room code are matched " .. ..
-      "together; with no code you are matched with the next random player.\n\n" .. ..
-      "(Simplified: no coup fourre, no scoring bonuses.)", "OK")
+   Local t$
+   t$ = ""
+   t$ = t$ .. "Goal: be the first to travel exactly 1000 km.\n\n"
+   t$ = t$ .. "Each turn you draw a card, then play or discard one.\n\n"
+   t$ = t$ .. "DISTANCE cards move you, but only while rolling. You need a GO card to start, "
+   t$ = t$ .. "and again after every hazard is repaired. Only two 200 km cards per game. "
+   t$ = t$ .. "Under a SPEED LIMIT you may only play 25 or 50 km.\n\n"
+   t$ = t$ .. "HAZARDS (Accident, Out of Gas, Flat Tire, Stop) can only be played on a "
+   t$ = t$ .. "rolling opponent; Speed Limit can be played any time.\n\n"
+   t$ = t$ .. "REMEDIES: Repairs, Gasoline, Spare Tire fix their hazard (then you need GO). "
+   t$ = t$ .. "GO fixes Stop. End of Limit removes the speed limit.\n\n"
+   t$ = t$ .. "SAFETIES give permanent protection and an extra turn. Right of Way makes "
+   t$ = t$ .. "you immune to Stop and Speed Limit and means you never need GO.\n\n"
+   t$ = t$ .. "If the draw pile runs out, whoever has gone farthest wins.\n\n"
+   t$ = t$ .. "ACCOUNTS: if the server has accounts turned on, enter a password to log in "
+   t$ = t$ .. "(a new name creates the account). Your online games are then recorded and "
+   t$ = t$ .. "you can add friends.\n\n"
+   t$ = t$ .. "ONLINE: fill in the server, your name and (optionally) a room code, then "
+   t$ = t$ .. "press Find opponent. Two players who use the same room code are matched "
+   t$ = t$ .. "together; with no code you are matched with the next random player.\n\n"
+   t$ = t$ .. "(Simplified: no coup fourre, no scoring bonuses.)"
+   moai.Request("HollyBornes - Rules", t$, "OK")
 EndFunction
 
 Function p_About()
-   moai.Request("About HollyBornes", ..
-      "HollyBornes 1.2\n\n" .. ..
-      "A Hollywood take on the classic French road-race card game Mille Bornes,\n" .. ..
-      "written in Hollywood with RapaGUI.\n\n" .. ..
-      "Play against the Computer, or online against\n" .. ..
-      "another player through the matchmaking server,\n" .. ..
-      "and be the first to travel exactly 1000 km.", "OK")
+   Local t$
+   t$ = ""
+   t$ = t$ .. "HollyBornes 1.2\n\n"
+   t$ = t$ .. "A Hollywood take on the classic French road-race card game Mille Bornes,\n"
+   t$ = t$ .. "written in Hollywood with RapaGUI.\n\n"
+   t$ = t$ .. "Play against the Computer, or online against\n"
+   t$ = t$ .. "another player through the matchmaking server,\n"
+   t$ = t$ .. "and be the first to travel exactly 1000 km."
+   moai.Request("About HollyBornes", t$, "OK")
 EndFunction
 
 Function p_FriendAdd()
