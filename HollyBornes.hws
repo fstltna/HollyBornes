@@ -9,7 +9,7 @@
 @REQUIRE "rapagui.hwp"
 
 @APPTITLE "HollyBornes"
-@APPVERSION "$VER: HollyBornes 1.2 (26.10.2026)"
+@APPVERSION "$VER: HollyBornes 1.3 (27.10.2026)"
 @APPAUTHOR "You"
 @APPCOPYRIGHT "Public domain"
 @APPDESCRIPTION "The classic French road-race card game"
@@ -61,6 +61,8 @@ G.sn = {}             ; what the friends list currently shows (for selection)
 G.sk = {}
 G.sc = 0
 G.fsel = -1
+G.sndok = False       ; the card sound was created successfully
+G.sndon = True        ; sound switched on (Game menu)
 G.pop = ""            ; lines collected for popups (history, leaderboard)
 
 ; ============================================================================
@@ -175,6 +177,49 @@ EndFunction
 ; ============================================================================
 ;  GAME STATE
 ; ============================================================================
+; ============================================================================
+;  SOUND  (the card sound is synthesised at startup, so no sound file is needed)
+; ============================================================================
+Function p_InitSound()
+   Local t, i, n, y, env, v, err
+   n = 1800                       ; about 80 ms at 22050 Hz
+   t = {}
+   y = 0
+   env = 1.0
+   For i = 0 To n - 1
+      y = (y * 2 + (Rnd(256) - 128)) / 3    ; soft noise: a card snapping onto the table
+      v = Int(y * env * 1.6)
+      If v > 127 Then v = 127
+      If v < -128 Then v = -128
+      t[i] = v
+      env = env * 0.9975                    ; fast decay
+   Next
+   ExitOnError(False)
+   CreateSample(1, t, 22050)
+   err = GetLastError()
+   ExitOnError(True)
+   If err = 0 Then G.sndok = True
+EndFunction
+
+Function p_PlaySound()
+   If G.sndok = True And G.sndon = True Then PlaySample(1)
+EndFunction
+
+Function p_ToggleSound()
+   If G.sndok = False
+      p_Log("Sound is not available on this system.")
+      Return
+   EndIf
+   If G.sndon = True
+      G.sndon = False
+      p_Log("Sound off.")
+   Else
+      G.sndon = True
+      p_Log("Sound on.")
+      p_PlaySound()
+   EndIf
+EndFunction
+
 Function p_NewPlayer()
    Local p, i
    p = {}
@@ -276,6 +321,7 @@ Function p_Apply(w, c)
    o = 1 - w
    k = p_Kind(c)
    who$ = p_Who$(w)
+   p_PlaySound()
 
    If k = 0
       G.P[w].km = G.P[w].km + p_DistKm(c)
@@ -1008,7 +1054,7 @@ EndFunction
 Function p_About()
    Local t$
    t$ = ""
-   t$ = t$ .. "HollyBornes 1.2\n\n"
+   t$ = t$ .. "HollyBornes 1.3\n\n"
    t$ = t$ .. "A Hollywood take on the classic French road-race card game Mille Bornes,\n"
    t$ = t$ .. "written in Hollywood with RapaGUI.\n\n"
    t$ = t$ .. "Play against the Computer, or online against\n"
@@ -1088,6 +1134,8 @@ Function p_Event(msg)
             p_FindMatch()
          Case "mrules":
             p_Rules()
+         Case "msound":
+            p_ToggleSound()
          Case "mabout":
             p_About()
          Case "mquit":
@@ -1161,6 +1209,7 @@ moai.CreateApp([[
          <item id="mnew">New game vs computer</item>
          <item id="mfind">Find online opponent</item>
          <item id="mrules">Rules...</item>
+         <item id="msound">Sound on / off</item>
          <item id="mabout">About...</item>
          <item/>
          <item id="mquit">Quit</item>
@@ -1253,6 +1302,7 @@ moai.CreateApp([[
 
 InstallEventHandler({RapaGUI = p_Event, OnReceiveData = p_NetEvent, OnDisconnect = p_NetEvent})
 
+p_InitSound()
 p_NewGameAI()
 
 Repeat
