@@ -9,10 +9,24 @@
 @REQUIRE "rapagui.hwp"
 
 @APPTITLE "HollyBornes"
-@APPVERSION "$VER: HollyBornes 1.3 (27.10.2026)"
+@APPVERSION "$VER: HollyBornes 1.8 (28.10.2026)"
 @APPAUTHOR "You"
 @APPCOPYRIGHT "Public domain"
 @APPDESCRIPTION "The classic French road-race card game"
+
+; Application icon: shown in the window border and task bar, and embedded in
+; executables compiled on Windows and macOS. The PNG files live in the "icons"
+; folder next to this script, so keep that folder with it.
+@APPICON {Ic16x16 = "icons/icon16.png",
+Ic24x24 = "icons/icon24.png",
+Ic32x32 = "icons/icon32.png",
+Ic48x48 = "icons/icon48.png",
+Ic64x64 = "icons/icon64.png",
+Ic96x96 = "icons/icon96.png",
+Ic128x128 = "icons/icon128.png",
+Ic256x256 = "icons/icon256.png",
+Ic512x512 = "icons/icon512.png",
+Ic1024x1024 = "icons/icon1024.png"}
 
 ; ---- Card IDs --------------------------------------------------------------
 Const #D25    = 0
@@ -53,6 +67,8 @@ G.oppname = "Computer"
 G.sel = -1
 G.welcomed = False    ; server accepted our HELLO / LOGIN
 G.login = ""          ; account name when logged in with a password
+G.myname = ""         ; the name we introduced ourselves with (guest or account)
+G.lsuffix = ""        ; stats shown next to the login indicator
 G.fn = {}             ; friends panel: names, kinds (0 friend, 1 request), status
 G.ft = {}
 G.fs = {}
@@ -525,7 +541,7 @@ Function p_HumanPlay()
       Return
    EndIf
    If G.sel < 0 Or G.sel >= G.P[0].hn
-      p_Log("Select a card in your hand first.")
+      p_Log("Choose a card first: press its number (1-7) under your hand.")
       Return
    EndIf
    slot = G.sel
@@ -560,7 +576,7 @@ Function p_HumanDiscard()
       Return
    EndIf
    If G.sel < 0 Or G.sel >= G.P[0].hn
-      p_Log("Select a card to discard first.")
+      p_Log("Choose a card first: press its number (1-7) under your hand.")
       Return
    EndIf
    slot = G.sel
@@ -622,6 +638,56 @@ Function p_SafetyText$(w)
    Return("Safeties: " .. s$ .. "   |   200s: " .. p_S$(G.P[w].n200) .. "/2")
 EndFunction
 
+; Card colours for the hand display (RRGGBB). Hazards red, remedies green.
+; Every line gets an explicit colour, so nothing depends on how a colour
+; "ends". The neutral colour is used for distance cards and safeties; change
+; it here if you prefer another one.
+Function p_CardColor$(c)
+   Local k
+   k = p_Kind(c)
+   If k = 1 Then Return("E0302B")    ; hazard: red
+   If k = 2 Then Return("1E9A33")    ; remedy: green
+   Return("707070")                  ; distance / safety
+EndFunction
+
+Function p_HandText$()
+   Local i, c, t$, l$
+   t$ = ""
+   For i = 0 To 6                      ; always exactly seven lines
+      If i > 0 Then t$ = t$ .. "\n"
+      If i < G.P[0].hn
+         c = G.P[0].hand[i]
+         l$ = "\27P[" .. p_CardColor$(c) .. "]"
+         If i = G.sel
+            l$ = l$ .. "\27b> "
+         Else
+            l$ = l$ .. "   "
+         EndIf
+         l$ = l$ .. p_S$(i + 1) .. ".  " .. p_Name$(c)
+         If p_CanPlay(0, c) = True Then l$ = l$ .. "     <- playable"
+         If i = G.sel Then l$ = l$ .. "\27n"
+         t$ = t$ .. l$
+      Else
+         t$ = t$ .. " "                ; empty slot
+      EndIf
+   Next
+   Return(t$)
+EndFunction
+
+Function p_ShowHand()
+   moai.Set("hand", "text", p_HandText$())
+EndFunction
+
+Function p_SelectCard(i)
+   If G.over = True Then Return
+   If i >= G.P[0].hn
+      p_Log("You only have " .. p_S$(G.P[0].hn) .. " cards.")
+      Return
+   EndIf
+   G.sel = i
+   p_ShowHand()
+EndFunction
+
 Function p_Refresh()
    Local i, c, w, t$
    For w = 0 To 1
@@ -639,16 +705,8 @@ Function p_Refresh()
    EndIf
    moai.Set("deckinfo", "text", t$)
 
-   moai.DoMethod("hand", "clear")
-   For i = 0 To G.P[0].hn - 1
-      c = G.P[0].hand[i]
-      t$ = p_Name$(c)
-      If p_CanPlay(0, c) = True
-         t$ = t$ .. "     <- playable"
-      EndIf
-      moai.DoMethod("hand", "insert", "bottom", t$)
-   Next
    G.sel = -1
+   p_ShowHand()
 EndFunction
 
 Function p_NewGameAI()
@@ -689,14 +747,31 @@ Function p_NetClose()
    p_ResetSession()
 EndFunction
 
+; the "Status:" line in the Online panel
+Function p_UpdateLoginStatus()
+   Local t$
+   If G.net = False
+      t$ = "Status: not connected"
+   ElseIf G.login <> ""
+      t$ = "Status: LOGGED IN as " .. G.login .. G.lsuffix
+   ElseIf G.welcomed = True
+      t$ = "Status: connected as guest " .. G.myname .. " (not logged in)"
+   Else
+      t$ = "Status: connecting..."
+   EndIf
+   moai.Set("lstat", "text", t$)
+EndFunction
+
 Function p_ResetSession()
    G.welcomed = False
    G.login = ""
+   G.lsuffix = ""
    G.fcnt = 0
    G.sc = 0
    G.fsel = -1
    G.pop = ""
    moai.DoMethod("friends", "clear")
+   p_UpdateLoginStatus()
 EndFunction
 
 Function p_SendIntro()
@@ -704,6 +779,7 @@ Function p_SendIntro()
    name$ = p_Clean$(moai.Get("pname", "text"))
    pw$ = moai.Get("pass", "text")
    If name$ = "" Then name$ = "Player"
+   G.myname = name$
    If pw$ = ""
       p_NetSend("HELLO " .. name$)       ; guest: no stats, no friends
    Else
@@ -933,10 +1009,18 @@ Function p_NetLine(line$)
    Case "WELCOME":
       G.welcomed = True
       p_Log("Connected to the server.")
+      p_UpdateLoginStatus()
    Case "LOGGEDIN":
       If c >= 8
          G.login = f[1]
-         p_Log("Logged in as " .. f[1] .. ": " .. f[2] .. " games, " .. f[3] .. " won, " .. f[4] .. " lost.")
+         G.lsuffix = "  (" .. f[2] .. " games, " .. f[3] .. " won)"
+         p_UpdateLoginStatus()
+         If f[7] = "NEW"
+            p_Log("Account created! Welcome, " .. f[1] .. ". You are now logged in, and your online games will be recorded.")
+            p_Log("Remember your password: use the same name and password to log in next time.")
+         Else
+            p_Log("Logged in as " .. f[1] .. ": " .. f[2] .. " games, " .. f[3] .. " won, " .. f[4] .. " lost.")
+         EndIf
          p_NetSend("FRIENDS")
       EndIf
    Case "WAIT":
@@ -990,6 +1074,7 @@ Function p_NetLine(line$)
       p_Log(line$)
    Case "ERR":
       p_Log("Server: " .. line$)
+      If G.welcomed = False Then moai.Set("lstat", "text", "Status: not logged in - " .. line$)
    EndSwitch
 EndFunction
 
@@ -1054,7 +1139,7 @@ EndFunction
 Function p_About()
    Local t$
    t$ = ""
-   t$ = t$ .. "HollyBornes 1.3\n\n"
+   t$ = t$ .. "HollyBornes 1.8\n\n"
    t$ = t$ .. "A Hollywood take on the classic French road-race card game Mille Bornes,\n"
    t$ = t$ .. "written in Hollywood with RapaGUI.\n\n"
    t$ = t$ .. "Play against the Computer, or online against\n"
@@ -1120,10 +1205,20 @@ Function p_AskPlayer(cmd$)
    EndIf
 EndFunction
 
+; Quit the program. Closing the connection first means an online opponent is
+; told straight away (leaving a game in progress counts as a forfeit).
+Function p_Quit()
+   If G.net = True
+      CloseConnection(#NETID)
+      G.net = False
+   EndIf
+   End
+EndFunction
+
 Function p_Event(msg)
    Switch msg.class
    Case "Window":
-      If msg.attribute = "CloseRequest" Then End
+      If msg.attribute = "CloseRequest" Then p_Quit()
 
    Case "Menuitem":
       If msg.attribute = "Selected"
@@ -1139,18 +1234,11 @@ Function p_Event(msg)
          Case "mabout":
             p_About()
          Case "mquit":
-            End
+            p_Quit()
          EndSwitch
       EndIf
 
    Case "Listview":
-      If msg.id = "hand" And msg.attribute = "Active"
-         If GetType(msg.triggervalue) = #NUMBER
-            G.sel = msg.triggervalue
-         Else
-            G.sel = -1
-         EndIf
-      EndIf
       If msg.id = "friends" And msg.attribute = "Active"
          If GetType(msg.triggervalue) = #NUMBER
             G.fsel = msg.triggervalue
@@ -1162,6 +1250,20 @@ Function p_Event(msg)
    Case "Button":
       If msg.attribute = "Pressed"
          Switch msg.id
+         Case "c0":
+            p_SelectCard(0)
+         Case "c1":
+            p_SelectCard(1)
+         Case "c2":
+            p_SelectCard(2)
+         Case "c3":
+            p_SelectCard(3)
+         Case "c4":
+            p_SelectCard(4)
+         Case "c5":
+            p_SelectCard(5)
+         Case "c6":
+            p_SelectCard(6)
          Case "bplay":
             p_HumanPlay()
          Case "bdiscard":
@@ -1212,7 +1314,7 @@ moai.CreateApp([[
          <item id="msound">Sound on / off</item>
          <item id="mabout">About...</item>
          <item/>
-         <item id="mquit">Quit</item>
+         <item id="mquit" shortcut="Ctrl+Q">Quit</item>
       </menu>
    </menubar>
 
@@ -1233,10 +1335,24 @@ moai.CreateApp([[
 
          <text id="deckinfo"> </text>
 
-         <vgroup frame="true" frametitle="Your hand - select a card, then Play or Discard">
-            <listview id="hand" notify="active">
-               <column/>
-            </listview>
+         <vgroup frame="true" frametitle="Your hand - choose a card (1-7), then Play or Discard">
+            <textview id="hand" styled="true" height="190">
+ 
+ 
+ 
+ 
+ 
+ 
+ </textview>
+            <hgroup>
+               <button id="c0">1</button>
+               <button id="c1">2</button>
+               <button id="c2">3</button>
+               <button id="c3">4</button>
+               <button id="c4">5</button>
+               <button id="c5">6</button>
+               <button id="c6">7</button>
+            </hgroup>
             <hgroup>
                <button id="bplay">Play card</button>
                <button id="bdiscard">Discard card</button>
@@ -1246,9 +1362,10 @@ moai.CreateApp([[
 
          <hgroup>
             <vgroup frame="true" frametitle="Play online (2 players)">
+               <text id="lstat">Status: not connected</text>
                <hgroup>
                   <label>Server:</label>
-                  <textentry id="host">localhost</textentry>
+                  <textentry id="host">millebornes.gameplayer.club</textentry>
                   <label>Port:</label>
                   <textentry id="port">5555</textentry>
                </hgroup>

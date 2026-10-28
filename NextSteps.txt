@@ -1,5 +1,2 @@
-Add indicator when logged in
+make card area tall enough to display the entire hand of cards without scrolling
 
-make card area tall enough to display the entire hand without scrolling
-
-Add a ctrl-c to quit game
