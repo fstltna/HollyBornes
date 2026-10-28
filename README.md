@@ -150,7 +150,7 @@ This version leaves out two rules of the original game:
 - **Game > Find online opponent** connects (if needed), logs you in, and joins the queue.
 - **Game > Rules...** shows a summary of the rules.
 - **Game > Sound on / off** switches the card sound on or off.
-- **Game > About...** shows version information.
+- **Game > About...** opens a window with the game icon and version information. Press OK, the Escape key or the close button to dismiss it.
 - **Game > Quit** exits the program. The keyboard shortcut is the system's standard quit key: **Ctrl+Q** on Windows and Linux, **Command+Q** on macOS. If you quit during an online game, your opponent is told you left, and it counts as a forfeit.
 
 ## How the online mode works
@@ -175,7 +175,7 @@ When accounts are on, the data directory holds `accounts.db` (accounts, stats, f
 
 ## Application icon
 
-The game declares its icon with `@APPICON` at the top of `HollyBornes.hws`, using the PNG files in the `icons` folder (a red race car on a playing card, on a green tile). It shows in the window border and task bar on Windows, macOS and Linux. When you compile the game to an executable, the icon is embedded on Windows and macOS; Linux does not support embedding icons in executables, so there it only appears on the window.
+The icon is also shown in the **About** window (the 128-pixel version, preloaded with `@BRUSH 1`). The game declares its icon with `@APPICON` at the top of `HollyBornes.hws`, using the PNG files in the `icons` folder (a red race car on a playing card, on a green tile). It shows in the window border and task bar on Windows, macOS and Linux. When you compile the game to an executable, the icon is embedded on Windows and macOS; Linux does not support embedding icons in executables, so there it only appears on the window.
 
 The `icons` folder must sit next to `HollyBornes.hws`: if Hollywood cannot find the files it stops at start-up with a file-not-found error. To use your own icon, replace the PNG files (they should have transparency and the same names and sizes), or delete the `@APPICON` lines if you do not want a custom icon.
 
@@ -214,4 +214,12 @@ The GUI is built with RapaGUI's XML layout system (`moai.CreateApp`) and handles
 
 ## License
 
-Add your preferred license here.
+Copyright (C) 2026 Marisa Giancarla.
+
+HollyBornes, including the matchmaking server, is free software released under the **GNU General Public License**, version 3 or (at your option) any later version. You may use, study, share and modify it, and share your modified versions, provided they are released under the same license. The software comes with **no warranty**.
+
+The full text of the license is at <https://www.gnu.org/licenses/gpl-3.0.html>.
+
+The RapaGUI plugin and Hollywood itself are separate products with their own licenses and are not covered by this one.
+
+For more information or support, visit <https://millebornes.gameplayer.club>.

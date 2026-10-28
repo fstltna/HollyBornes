@@ -4,14 +4,23 @@
 ; matchmaking server (see server/hollyserver.c). First to exactly 1000 km wins.
 ; Requires: Hollywood 9+ and the RapaGUI plugin.
 ; Run with:  Hollywood HollyBornes.hws      (or compile it to an executable)
+;
+; Copyright (C) 2026 Marisa Giancarla
+; SPDX-License-Identifier: GPL-3.0-or-later
+; This program is free software: you can redistribute it and/or modify it under
+; the terms of the GNU General Public License as published by the Free Software
+; Foundation, either version 3 of the License, or (at your option) any later
+; version. It is distributed WITHOUT ANY WARRANTY; without even the implied
+; warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+; General Public License for more details: https://www.gnu.org/licenses/
 ; ============================================================================
 
 @REQUIRE "rapagui.hwp"
 
 @APPTITLE "HollyBornes"
-@APPVERSION "$VER: HollyBornes 1.8 (28.10.2026)"
-@APPAUTHOR "You"
-@APPCOPYRIGHT "Public domain"
+@APPVERSION "$VER: HollyBornes 1.9 (28.10.2026)"
+@APPAUTHOR "Marisa Giancarla"
+@APPCOPYRIGHT "(C) 2026 Marisa Giancarla - GNU GPL"
 @APPDESCRIPTION "The classic French road-race card game"
 
 ; Application icon: shown in the window border and task bar, and embedded in
@@ -27,6 +36,9 @@ Ic128x128 = "icons/icon128.png",
 Ic256x256 = "icons/icon256.png",
 Ic512x512 = "icons/icon512.png",
 Ic1024x1024 = "icons/icon1024.png"}
+
+; Brush 1 is the game icon shown in the About window.
+@BRUSH 1, "icons/icon128.png"
 
 ; ---- Card IDs --------------------------------------------------------------
 Const #D25    = 0
@@ -1137,15 +1149,7 @@ Function p_Rules()
 EndFunction
 
 Function p_About()
-   Local t$
-   t$ = ""
-   t$ = t$ .. "HollyBornes 1.8\n\n"
-   t$ = t$ .. "A Hollywood take on the classic French road-race card game Mille Bornes,\n"
-   t$ = t$ .. "written in Hollywood with RapaGUI.\n\n"
-   t$ = t$ .. "Play against the Computer, or online against\n"
-   t$ = t$ .. "another player through the matchmaking server,\n"
-   t$ = t$ .. "and be the first to travel exactly 1000 km."
-   moai.Request("About HollyBornes", t$, "OK")
+   moai.Set("about", "open", True)
 EndFunction
 
 Function p_FriendAdd()
@@ -1218,7 +1222,13 @@ EndFunction
 Function p_Event(msg)
    Switch msg.class
    Case "Window":
-      If msg.attribute = "CloseRequest" Then p_Quit()
+      If msg.attribute = "CloseRequest"
+         If msg.id = "about"
+            moai.Set("about", "open", False)
+         Else
+            p_Quit()
+         EndIf
+      EndIf
 
    Case "Menuitem":
       If msg.attribute = "Selected"
@@ -1264,6 +1274,8 @@ Function p_Event(msg)
             p_SelectCard(5)
          Case "c6":
             p_SelectCard(6)
+         Case "aboutok":
+            moai.Set("about", "open", False)
          Case "bplay":
             p_HumanPlay()
          Case "bdiscard":
@@ -1412,6 +1424,30 @@ moai.CreateApp([[
                <column/>
             </listview>
          </vgroup>
+      </vgroup>
+   </window>
+
+   <window id="about" title="About HollyBornes" open="false" notify="closerequest">
+      <vgroup>
+         <hgroup>
+            <image brush="1"/>
+            <vgroup>
+               <text>HollyBornes 1.9</text>
+               <text> </text>
+               <text>A Hollywood take on the classic French road-race</text>
+               <text>card game Mille Bornes, written in Hollywood</text>
+               <text>with RapaGUI.</text>
+               <text> </text>
+               <text>Play against the Computer, or online against another</text>
+               <text>player through the matchmaking server, and be the</text>
+               <text>first to travel exactly 1000 km.</text>
+               <text> </text>
+               <text>(C) 2026 - Marisa Giancarla.</text>
+               <text>Go to https://millebornes.gameplayer.club</text>
+               <text>for more info or to get support.</text>
+            </vgroup>
+         </hgroup>
+         <button id="aboutok">OK</button>
       </vgroup>
    </window>
 </application>

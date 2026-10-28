@@ -1,5 +1,0 @@
-display the icon in the "about" display.
-
-add this text to the "about" display: (C) 2026 - Marisa Giancarla. Go to https://millebornes.gameplayer.club for more info or to get support.
-
-Set the license as "GPL".

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 Marisa Giancarla
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tests for the optional account mode: login, game records, friends, persistence.
 Usage: python3 test_accounts.py [path/to/hollyserver]"""
 import os, shutil, socket, subprocess, sys, tempfile, time
