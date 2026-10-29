@@ -22,7 +22,7 @@ Both clients run the same rules engine on the same deck and apply the same moves
 | Option | Meaning |
 |--------|---------|
 | `port` or `-p port` | TCP port, default 5555 |
-| `-d datadir` | Turn on **account mode**: logins, recorded games, friends. Data is stored in `datadir` (created if missing). Without it the server is anonymous-only and every account command answers `ERR accounts are not enabled`. |
+| `-d datadir` | Turn on **account mode**: logins, recorded games, friends. Data is stored in an SQLite database in `datadir` (created if missing). Without it the server is anonymous-only and every account command answers `ERR accounts are not enabled`. |
 | `--require-login` | With `-d`: refuse anonymous (`HELLO`) players |
 | `--selftest` | Check the built-in SHA-256 and exit |
 
@@ -96,14 +96,22 @@ Because results are reported by the clients, two players working together could 
 
 ## Account storage
 
-Account mode keeps everything in the data directory (created with mode 0700, files 0600):
+Account mode keeps everything in one SQLite database, `hollybornes.db`, inside the data directory (created with mode 0700, the database with mode 0600). Every change is committed immediately.
 
-| File | Contents |
-|------|----------|
-| `accounts.db` | Text file, rewritten atomically after every change: accounts, totals, friends, open requests and each player's last 10 games |
-| `games.log` | Append-only archive, one line per finished game: `unix-time nameA nameB kmA kmB resultA resultB` (A is seat 0) |
+| Table | Columns |
+|-------|---------|
+| `players` | `id`, `name` (unique, case-insensitive), `salt`, `hash`, `created`, `played`, `won`, `lost`, `drawn`, `forfeits` |
+| `friends` | `player_id`, `friend_id`, `since` (one row per direction) |
+| `friend_requests` | `from_id`, `to_id`, `created` |
+| `games` | `id`, `played_at`, `p0_id`, `p1_id` (NULL for a guest), `name0`, `name1`, `km0`, `km1`, `res0`, `res1`. Player 0 is seat 0. |
+
+`HISTORY` returns the newest 10 rows of `games` for a player, flipped to that player's point of view. For a disputed game each side's own reported distance is stored.
 
 Passwords are never stored. The server keeps a random 16-byte salt and a salted, iterated (5000 rounds) SHA-256 hash per account.
+
+The schema version is kept in `PRAGMA user_version` (currently 1). A server refuses to open a database from a newer version.
+
+**Import of the old text format.** Earlier versions stored `accounts.db` and `games.log` as text files. When the data directory has such a file and the SQLite database has no players yet, the server imports it once at start-up (in a single transaction) and renames the old files to `*.migrated`.
 
 The connection itself is **not encrypted**, so passwords travel in clear text. Use a throw-away password, or put the server behind a TLS or SSH tunnel (for example `ssh -L 5555:localhost:5555 yourserver`).
 

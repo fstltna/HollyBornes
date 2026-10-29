@@ -1,8 +1,9 @@
 CC      ?= cc
 CFLAGS  ?= -O2 -Wall -Wextra
+LDLIBS  ?= -lsqlite3
 
 hollyserver: hollyserver.c
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
 
 test: hollyserver
 	./hollyserver --selftest

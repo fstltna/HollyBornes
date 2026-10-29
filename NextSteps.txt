@@ -1,0 +1,4 @@
+on sucessfully completed games store the number of turns in the game in the winners database record if it is less than the previous record or the first game
+
+at a slightly higher pitch than the played card sound effect for other UI actions so the players know something happened
+

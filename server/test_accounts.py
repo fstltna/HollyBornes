@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 Marisa Giancarla
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Tests for the optional account mode: login, game records, friends, persistence.
+"""Tests for the optional account mode: login, game records, friends, SQLite persistence,
+and the one-time import of the old text database.
 Usage: python3 test_accounts.py [path/to/hollyserver]"""
-import os, shutil, socket, subprocess, sys, tempfile, time
+import hashlib, os, shutil, socket, sqlite3, subprocess, sys, tempfile, time
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "./hollyserver"
 PORT = 5598
@@ -67,13 +68,9 @@ class C:
         s.send("LOGIN %s %s" % (name, pw)); return s.line(), s.line()
 
 def play_match(a, b):
-    """a and b are logged in; returns (a_line, b_line) of MATCH"""
+    """a and b are logged in; returns their two MATCH lines (skipping WAIT and notifications)"""
     a.send("FIND"); b.send("FIND")
-    la, lb = a.line(), b.line()
-    # whoever waited first got WAIT before MATCH
-    if la == "WAIT": la = a.line()
-    if lb == "WAIT": lb = b.line()
-    return la, lb
+    return a.wait("MATCH"), b.wait("MATCH")
 
 # ---------------------------------------------------------------- accounts off
 srv = start()
@@ -171,10 +168,23 @@ finally:
     out1 = stop(srv)
 
 # ---------------------------------------------------------------- persistence
-db = open(os.path.join(DATA, "accounts.db")).read()
-check("pw-alice" not in db and "pw-bob" not in db, "database stores no plaintext passwords")
-check(os.path.getsize(os.path.join(DATA, "games.log")) > 0, "games.log archive written")
-check((os.stat(os.path.join(DATA, "accounts.db")).st_mode & 0o077) == 0, "database file is private (0600)")
+DBFILE = os.path.join(DATA, "hollybornes.db")
+raw = open(DBFILE, "rb").read()
+check(b"pw-alice" not in raw and b"pw-bob" not in raw and b"pw-carol" not in raw, "database file contains no plaintext passwords")
+check((os.stat(DBFILE).st_mode & 0o077) == 0, "database file is private (0600)")
+check(not os.path.exists(os.path.join(DATA, "accounts.db")) and not os.path.exists(os.path.join(DATA, "games.log")),
+      "no old text files are written any more")
+con = sqlite3.connect("file:%s?mode=ro" % DBFILE, uri=True)
+check(con.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "SQLite integrity check passes")
+check(con.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 3, "three accounts stored (alice, bob, carol)")
+check(con.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 5, "all five games stored in the games table")
+row = con.execute("SELECT played, won, lost, drawn, forfeits FROM players WHERE name = 'alice'").fetchone()
+check(row == (5, 2, 1, 1, 1), "stats row for alice matches what the server reported: %s" % (row,))
+check(len(con.execute("SELECT hash FROM players").fetchone()[0]) == 64 and
+      all(len(r[0]) == 32 for r in con.execute("SELECT salt FROM players")), "hashes and salts stored, not passwords")
+fr = con.execute("SELECT COUNT(*) FROM friends").fetchone()[0]
+check(fr == 2, "alice-carol friendship stored in both directions (%d rows)" % fr)
+con.close()
 
 srv = start("-d", DATA)
 try:
@@ -187,6 +197,91 @@ try:
     bad = C(); bad.send("LOGIN alice wrongpw1"); check(bad.line() == "ERR wrong password", "password still enforced after restart")
 finally:
     stop(srv)
+
+# ---------------------------------------------------------------- import of the old text database
+def legacy_hash(salt, pw):                      # the hash the text-file versions of the server used
+    x = hashlib.sha256((salt + pw).encode()).digest()
+    for _ in range(5000):
+        x = hashlib.sha256(x + (salt + pw).encode()).digest()
+    return x.hex()
+
+LEG = tempfile.mkdtemp(prefix="hollyleg")
+s1, s2, s3 = "00112233445566778899aabbccddeeff", "ffeeddccbbaa99887766554433221100", "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+open(LEG + "/accounts.db", "w").write(
+    "HOLLYBORNES-DB 1\n"
+    "A dora %s %s 1700000000 7 4 2 1 0\n" % (s1, legacy_hash(s1, "dora-pass")) +
+    "A eli %s %s 1700000100 3 1 2 0 1\n" % (s2, legacy_hash(s2, "eli-pass")) +
+    "A fay %s %s 1700000200 0 0 0 0 0\n" % (s3, legacy_hash(s3, "fay-pass")) +
+    "F dora eli\nF eli dora\nR fay dora\n"
+    "G dora 1700000200 eli 1000 400 W\n")
+open(LEG + "/games.log", "w").write(
+    "1700000200 dora eli 1000 400 W L\n"
+    "1700000300 eli dora 900 1000 L W\n"
+    "1700000400 dora guestx 500 500 D D\n")
+
+srv = start("-d", LEG)
+try:
+    d = C(); w, l = d.login("dora", "dora-pass")
+    check(l == "LOGGEDIN dora 7 4 2 1 0 RETURNING", "old account imported and old password still works: " + str(l))
+    d.send("FRIENDS"); r = d.until("ENDFRIENDS")
+    check("FRIEND eli offline" in r and "REQUEST fay" in r, "old friends and open request imported")
+    d.send("HISTORY"); h = [x.split()[2:] for x in d.until("ENDHISTORY") if x.startswith("GAME")]
+    check(h == [["guestx", "500", "500", "D"], ["eli", "1000", "900", "W"], ["eli", "1000", "400", "W"]],
+          "old games imported, newest first, seen from dora's side: " + str(h))
+    bad = C(); bad.send("LOGIN dora wrongpass1"); check(bad.line() == "ERR wrong password", "wrong password still refused after import")
+finally:
+    out = stop(srv)
+check("import done: 3 accounts, 2 friendships, 1 requests, 3 games" in out, "server logged the import summary")
+check(os.path.exists(LEG + "/accounts.db.migrated") and os.path.exists(LEG + "/games.log.migrated") and
+      not os.path.exists(LEG + "/accounts.db"), "old files renamed to *.migrated (kept as a backup)")
+
+srv = start("-d", LEG)                                      # second start must not import again
+try:
+    d = C(); w, l = d.login("dora", "dora-pass")
+    check(l.startswith("LOGGEDIN dora 7 4 2 1 0"), "stats unchanged after a second start")
+finally:
+    out = stop(srv)
+check("importing" not in out, "old files are not imported twice")
+con = sqlite3.connect("file:%s/hollybornes.db?mode=ro" % LEG, uri=True)
+check(con.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 3 and
+      con.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 3, "no duplicate rows after restart")
+con.close()
+shutil.rmtree(LEG, ignore_errors=True)
+
+# a data directory with a corrupt/foreign accounts.db must not be imported or damaged
+BADD = tempfile.mkdtemp(prefix="hollybad")
+open(BADD + "/accounts.db", "w").write("this is not a HollyBornes database\n")
+srv = start("-d", BADD)
+try:
+    z = C(); w, l = z.login("zed", "zed-pass")
+    check(l.startswith("LOGGEDIN zed 0 0 0 0 0 NEW"), "server starts normally next to an unrelated accounts.db")
+finally:
+    stop(srv)
+check(open(BADD + "/accounts.db").read().startswith("this is not"), "the unrelated file was left untouched")
+shutil.rmtree(BADD, ignore_errors=True)
+
+# ---------------------------------------------------------------- crash safety
+CR = tempfile.mkdtemp(prefix="hollycrash")
+srv = start("-d", CR)
+a, b = C(), C()
+a.login("anna", "crash-pw1"); b.login("ben", "crash-pw2")
+a.send("FRIEND ADD ben"); a.wait("OK"); b.wait("FRIENDREQ"); b.send("FRIEND ACCEPT anna"); b.wait("OK")
+for i in range(3):
+    play_match(a, b)
+    a.send("RESULT 1000 %d" % (100 * i)); b.send("RESULT %d 1000" % (100 * i))
+    a.send("LEAVE"); b.send("LEAVE"); time.sleep(0.15)
+a.send("STATS"); before = a.wait("STATS")
+srv.kill(); srv.wait()                                  # SIGKILL: no clean shutdown, like a crash or power cut
+srv = start("-d", CR)
+try:
+    a2 = C(); w, l = a2.login("anna", "crash-pw1")
+    a2.send("FRIENDS"); fr = a2.until("ENDFRIENDS")
+    check(before == "STATS anna 3 3 0 0 0" and l.startswith("LOGGEDIN anna 3 3 0 0 0"),
+          "recorded games survive kill -9 (%s)" % before)
+    check("FRIEND ben offline" in fr, "friendships survive kill -9")
+finally:
+    stop(srv)
+shutil.rmtree(CR, ignore_errors=True)
 
 # ---------------------------------------------------------------- require-login
 srv = start("-d", DATA, "--require-login")

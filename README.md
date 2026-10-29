@@ -6,7 +6,7 @@ A Hollywood take on the classic French road-race card game **Mille Bornes**, wri
 
 - [Hollywood](https://www.hollywood-mal.com) 9.0 or later
 - The [RapaGUI](https://www.hollywood-mal.com/rapagui.html) plugin (`rapagui.hwp`), installed so Hollywood can find it. The script loads it with `@REQUIRE "rapagui.hwp"` (see Troubleshooting).
-- For online play: a running matchmaking server (see below). Building it needs a C compiler and POSIX sockets (Linux, macOS, BSD, or WSL on Windows).
+- For online play: a running matchmaking server (see below). Building it needs a C compiler, POSIX sockets (Linux, macOS, BSD, or WSL on Windows) and the SQLite development files: `sudo apt install libsqlite3-dev` on Debian/Ubuntu, `sudo dnf install sqlite-devel` on Fedora; macOS already includes SQLite.
 
 ## Running the game
 
@@ -32,7 +32,7 @@ Server options:
 
 | Option | Meaning |
 |--------|---------|
-| `-d datadir` | Turn on **accounts**: logins, recorded games, friends and a leaderboard, stored in `datadir` |
+| `-d datadir` | Turn on **accounts**: logins, recorded games, friends and a leaderboard, stored in an SQLite database (`hollybornes.db`) in `datadir` |
 | `--require-login` | With `-d`: only registered players may connect (no guests) |
 | `-p port` | Same as the positional port |
 | `--selftest` | Check the built-in password hashing and exit |
@@ -166,12 +166,39 @@ Because both clients hold the full deck order, a modified client could peek at t
 | `HollyBornes.hws` | The complete game: rules engine, computer player, online client and RapaGUI interface |
 | `icons/` | The application icon as PNG files in ten sizes (16 to 1024 pixels). Keep this folder next to `HollyBornes.hws`. |
 | `server/hollyserver.c` | The matchmaking, relay and account server (single-threaded C, `poll()` based) |
-| `server/Makefile` | `make` builds the server, `make test` runs all tests |
+| `server/Makefile` | `make` builds the server (linking SQLite), `make test` runs all tests |
 | `server/test_server.py` | Protocol tests for matchmaking, rooms, relaying, leaving, disconnects and abuse |
 | `server/test_accounts.py` | Tests for logins, recorded games, forfeits, friends, leaderboard and persistence across restarts |
 | `server/PROTOCOL.md` | The text protocol spoken between game and server, and the storage format |
 
-When accounts are on, the data directory holds `accounts.db` (accounts, stats, friends, recent games) and `games.log` (one line per finished game). Back these up if you care about them.
+When accounts are on, everything is stored in one SQLite file, `hollybornes.db`, in the data directory.
+
+### The database
+
+| Table | Contents |
+|-------|----------|
+| `players` | One row per account: name, salted password hash, creation time and totals (played, won, lost, drawn, forfeits) |
+| `friends` | Friendships, one row per direction |
+| `friend_requests` | Open friend requests |
+| `games` | Every finished game: time, both players (or guest names), distances and results (`W` won, `L` lost, `D` draw, `F` forfeit, `X` disputed) |
+
+Every change is written to the database immediately, so nothing is lost if the server crashes or the machine loses power. Player totals and friends are also kept in memory while the server runs. The `HISTORY` command reads the games table, so the full history of every game is kept even though the game only shows the last 10.
+
+**Backups.** Stop the server and copy `hollybornes.db`, or take a live backup with the `sqlite3` command-line tool:
+
+```
+sqlite3 hollydata/hollybornes.db ".backup backup.db"
+```
+
+**Looking at the data.** The file can be opened with any SQLite tool. For example, the ten players with the most wins:
+
+```
+sqlite3 hollydata/hollybornes.db "SELECT name, won, played FROM players ORDER BY won DESC LIMIT 10;"
+```
+
+Stop the server before changing anything by hand, because it keeps player totals and friends in memory and would not notice the change (and could write the old values back).
+
+**Upgrading from the text-file version.** Earlier versions kept the data in `accounts.db` and `games.log`. If the data directory contains those files and no database yet, the server imports them automatically the first time it starts: accounts, passwords, totals, friendships, open requests and the full game archive. The old files are renamed to `accounts.db.migrated` and `games.log.migrated` and kept as a backup. If the import fails, nothing is changed and the server refuses to start.
 
 ## Application icon
 
@@ -202,7 +229,7 @@ Check that `hollyserver` is running, that the Server and Port fields match, and 
 
 **"Wrong password" or "that name is registered"**
 
-Account names are not case-sensitive, and a registered name cannot be used by guests. If you forgot the password, the account can only be reset by deleting its `A` line (and any lines naming it) from `accounts.db` while the server is stopped.
+Account names are not case-sensitive, and a registered name cannot be used by guests. If you forgot the password, the account can only be reset by deleting it while the server is stopped, so the person can register the name again: `sqlite3 hollydata/hollybornes.db "DELETE FROM players WHERE name = 'thename';"`. That also removes their friendships and requests; their past games stay in the history under the name they used.
 
 **Online game ends with "Out of sync"**
 

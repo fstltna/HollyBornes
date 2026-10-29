@@ -11,8 +11,8 @@
  *
  * Optional account mode (-d <dir>)
  *   - registered players log in with a name + password
- *   - finished games are recorded: totals, a short history per player and an
- *     append-only archive (games.log)
+ *   - accounts, friends and every finished game are stored in an SQLite
+ *     database (hollybornes.db) inside that directory
  *   - players can send friend requests, see which friends are online, and
  *     look at stats and a leaderboard
  *
@@ -20,7 +20,9 @@
  * rules engine on the same deck and apply the same moves in the same order.
  * Results are reported by both clients and cross-checked (see PROTOCOL.md).
  *
- * Build:  cc -O2 -Wall -Wextra -o hollyserver hollyserver.c
+ * Build:  cc -O2 -Wall -Wextra -o hollyserver hollyserver.c -lsqlite3
+ *         (needs the SQLite development files: libsqlite3-dev on Debian/Ubuntu,
+ *          sqlite-devel on Fedora; macOS ships with SQLite)
  * Run:    ./hollyserver [port] [-d datadir] [--require-login]
  *         ./hollyserver --selftest
  *
@@ -46,6 +48,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
+#include <sqlite3.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -78,7 +81,8 @@
 #define MAX_ACCOUNTS   4096
 #define MAX_FRIENDS    50
 #define MAX_REQS       20
-#define HIST_LEN       10
+#define HIST_ROWS      10   /* games returned by HISTORY */
+#define DB_FILE        "hollybornes.db"
 #define HASH_ROUNDS    5000
 
 /* =========================================================================
@@ -272,13 +276,6 @@ typedef struct {
 } Client;
 
 typedef struct {
-    time_t t;
-    int    km, okm;
-    char   res;                /* W L D F(orfeit) X(disputed) */
-    char   opp[NAME_LEN + 1];
-} GameRec;
-
-typedef struct {
     char    name[NAME_LEN + 1];
     char    salt[33];
     char    hash[65];
@@ -288,8 +285,7 @@ typedef struct {
     int     nfriends;
     int     reqs[MAX_REQS];    /* incoming friend requests (account indices) */
     int     nreqs;
-    GameRec hist[HIST_LEN];    /* newest first */
-    int     nhist;
+    long long dbid;            /* players.id in the database */
     int     online;            /* client index or -1 */
 } Account;
 
@@ -313,7 +309,7 @@ static unsigned long g_matches = 0;
 static char g_dir[256] = "";          /* data directory; empty = accounts off */
 static int  g_accounts = 0;
 static int  g_require_login = 0;
-static int  g_dirty = 0;
+static sqlite3 *g_db = NULL;
 
 /* ------------------------------------------------------------------ log */
 
@@ -467,8 +463,46 @@ static void notify_acct(int ai, const char *fmt, ...)
 }
 
 /* =========================================================================
- *  Account database
+ *  Account database (SQLite)
+ *
+ *  Accounts, friends and their stats are cached in memory (accts[]) for fast
+ *  lookups; every change is written to the database straight away. Games are
+ *  only stored in the database, and HISTORY reads them from there.
  * ========================================================================= */
+
+static const char SCHEMA[] =
+    "CREATE TABLE IF NOT EXISTS players ("
+    "  id INTEGER PRIMARY KEY,"
+    "  name TEXT NOT NULL UNIQUE COLLATE NOCASE,"
+    "  salt TEXT NOT NULL,"
+    "  hash TEXT NOT NULL,"
+    "  created INTEGER NOT NULL,"
+    "  played INTEGER NOT NULL DEFAULT 0,"
+    "  won INTEGER NOT NULL DEFAULT 0,"
+    "  lost INTEGER NOT NULL DEFAULT 0,"
+    "  drawn INTEGER NOT NULL DEFAULT 0,"
+    "  forfeits INTEGER NOT NULL DEFAULT 0);"
+    "CREATE TABLE IF NOT EXISTS friends ("
+    "  player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,"
+    "  friend_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,"
+    "  since INTEGER NOT NULL,"
+    "  PRIMARY KEY (player_id, friend_id)) WITHOUT ROWID;"
+    "CREATE TABLE IF NOT EXISTS friend_requests ("
+    "  from_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,"
+    "  to_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,"
+    "  created INTEGER NOT NULL,"
+    "  PRIMARY KEY (from_id, to_id)) WITHOUT ROWID;"
+    "CREATE TABLE IF NOT EXISTS games ("
+    "  id INTEGER PRIMARY KEY,"
+    "  played_at INTEGER NOT NULL,"
+    "  p0_id INTEGER REFERENCES players(id) ON DELETE SET NULL,"  /* NULL = guest */
+    "  p1_id INTEGER REFERENCES players(id) ON DELETE SET NULL,"
+    "  name0 TEXT NOT NULL, name1 TEXT NOT NULL,"
+    "  km0 INTEGER NOT NULL, km1 INTEGER NOT NULL,"
+    "  res0 TEXT NOT NULL, res1 TEXT NOT NULL);"                /* W L D F X */
+    "CREATE INDEX IF NOT EXISTS games_p0 ON games(p0_id, id);"
+    "CREATE INDEX IF NOT EXISTS games_p1 ON games(p1_id, id);"
+    "PRAGMA user_version = 1;";
 
 static int find_acct(const char *name)
 {
@@ -478,6 +512,22 @@ static int find_acct(const char *name)
     for (i = 0; i < nacc; i++)
         if (strcasecmp(accts[i].name, name) == 0)
             return i;
+    return -1;
+}
+
+/* accts[] is kept sorted by dbid (accounts are only ever appended) */
+static int find_by_dbid(long long id)
+{
+    int lo = 0, hi = nacc - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        if (accts[mid].dbid == id)
+            return mid;
+        if (accts[mid].dbid < id)
+            lo = mid + 1;
+        else
+            hi = mid - 1;
+    }
     return -1;
 }
 
@@ -501,110 +551,307 @@ static void list_del(int *a, int *n, int v)
         }
 }
 
-static void db_path(char *out, size_t sz, const char *file)
+static int db_error(const char *what)
 {
-    snprintf(out, sz, "%s/%s", g_dir, file);
+    logf_("database error (%s): %s", what, g_db ? sqlite3_errmsg(g_db) : "no database");
+    return -1;
 }
 
-static void db_save(void)
+/* run SQL that has no parameters and no results */
+static int db_exec(const char *sql)
 {
-    char path[320], tmp[330];
+    char *err = NULL;
+
+    if (!g_db)
+        return -1;
+    if (sqlite3_exec(g_db, sql, NULL, NULL, &err) != SQLITE_OK) {
+        logf_("database error: %s", err ? err : "unknown");
+        sqlite3_free(err);
+        return -1;
+    }
+    return 0;
+}
+
+/* Run one statement with bound parameters. 'types' has one letter per ?:
+ * 'i' = long long, 's' = const char * (NULL binds SQL NULL). Returns 0 or -1. */
+static int db_run(const char *sql, const char *types, ...)
+{
+    sqlite3_stmt *st;
+    va_list ap;
+    int i, rc;
+
+    if (!g_db)
+        return -1;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
+        return db_error("prepare");
+    va_start(ap, types);
+    for (i = 0; types[i]; i++) {
+        if (types[i] == 'i') {
+            sqlite3_bind_int64(st, i + 1, va_arg(ap, long long));
+        } else {
+            const char *t = va_arg(ap, const char *);
+            if (t)
+                sqlite3_bind_text(st, i + 1, t, -1, SQLITE_TRANSIENT);
+            else
+                sqlite3_bind_null(st, i + 1);
+        }
+    }
+    va_end(ap);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW)
+        return db_error("step");
+    return 0;
+}
+
+/* single integer result of a query without parameters; -1 on error */
+static long long db_scalar(const char *sql)
+{
+    sqlite3_stmt *st;
+    long long v = -1;
+
+    if (!g_db || sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    if (sqlite3_step(st) == SQLITE_ROW)
+        v = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return v;
+}
+
+static long long id_by_name(const char *name)
+{
+    sqlite3_stmt *st;
+    long long id = -1;
+
+    if (sqlite3_prepare_v2(g_db, "SELECT id FROM players WHERE name = ?1", -1, &st, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(st, 1, name, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(st) == SQLITE_ROW)
+        id = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return id;
+}
+
+/* id0 / id1 are players.id, or -1 for a guest */
+static int db_insert_game(time_t t, long long id0, long long id1, const char *n0, const char *n1,
+                          int km0, int km1, char r0, char r1)
+{
+    sqlite3_stmt *st;
+    char a[2], b[2];
+    int rc;
+
+    a[0] = r0; a[1] = '\0';
+    b[0] = r1; b[1] = '\0';
+    if (sqlite3_prepare_v2(g_db,
+            "INSERT INTO games(played_at,p0_id,p1_id,name0,name1,km0,km1,res0,res1) "
+            "VALUES(?,?,?,?,?,?,?,?,?)", -1, &st, NULL) != SQLITE_OK)
+        return db_error("prepare game");
+    sqlite3_bind_int64(st, 1, (long long)t);
+    if (id0 >= 0) sqlite3_bind_int64(st, 2, id0); else sqlite3_bind_null(st, 2);
+    if (id1 >= 0) sqlite3_bind_int64(st, 3, id1); else sqlite3_bind_null(st, 3);
+    sqlite3_bind_text(st, 4, n0, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 5, n1, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 6, km0);
+    sqlite3_bind_int64(st, 7, km1);
+    sqlite3_bind_text(st, 8, a, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 9, b, -1, SQLITE_TRANSIENT);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : db_error("insert game");
+}
+
+static int db_open(void)
+{
+    char path[320];
+    long long ver;
+
+    snprintf(path, sizeof path, "%s/%s", g_dir, DB_FILE);
+    if (sqlite3_open_v2(path, &g_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) != SQLITE_OK) {
+        fprintf(stderr, "cannot open database %s: %s\n", path, g_db ? sqlite3_errmsg(g_db) : "out of memory");
+        return -1;
+    }
+    sqlite3_busy_timeout(g_db, 5000);
+    if (db_exec("PRAGMA foreign_keys = ON") < 0)
+        return -1;
+    ver = db_scalar("PRAGMA user_version");
+    if (ver > 1) {
+        fprintf(stderr, "%s was made by a newer version of HollyBornes (schema %lld)\n", path, ver);
+        return -1;
+    }
+    if (db_exec(SCHEMA) < 0)
+        return -1;
+    logf_("database: %s (SQLite %s)", path, sqlite3_libversion());
+    return 0;
+}
+
+/* One-time import of the old text files (accounts.db + games.log) that earlier
+ * versions kept in the data directory. Only runs on an empty database. The old
+ * files are renamed to *.migrated afterwards and kept as a backup. */
+static int db_migrate_legacy(void)
+{
+    char oldacc[320], oldlog[320], line[512];
     FILE *f;
-    int i, j;
+    int na = 0, nf = 0, nr = 0, ng = 0;
+    long long now = (long long)time(NULL);
 
-    if (!g_accounts)
-        return;
-    db_path(path, sizeof path, "accounts.db");
-    snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    f = fopen(tmp, "w");
-    if (!f) {
-        logf_("cannot write %s: %s", tmp, strerror(errno));
-        return;
+    snprintf(oldacc, sizeof oldacc, "%s/accounts.db", g_dir);
+    snprintf(oldlog, sizeof oldlog, "%s/games.log", g_dir);
+    if (db_scalar("SELECT COUNT(*) FROM players") != 0)
+        return 0;
+    f = fopen(oldacc, "r");
+    if (!f)
+        return 0;
+    if (!fgets(line, sizeof line, f) || strncmp(line, "HOLLYBORNES-DB", 14) != 0) {
+        fclose(f);
+        return 0;
     }
-    fprintf(f, "HOLLYBORNES-DB 1\n");
-    for (i = 0; i < nacc; i++) {
-        Account *a = &accts[i];
-        fprintf(f, "A %s %s %s %ld %d %d %d %d %d\n", a->name, a->salt, a->hash,
-                (long)a->created, a->played, a->won, a->lost, a->drawn, a->forfeits);
+    logf_("importing the old text database from %s ...", oldacc);
+    if (db_exec("BEGIN IMMEDIATE") < 0) {
+        fclose(f);
+        return -1;
     }
-    for (i = 0; i < nacc; i++) {
-        Account *a = &accts[i];
-        for (j = 0; j < a->nfriends; j++)
-            fprintf(f, "F %s %s\n", a->name, accts[a->friends[j]].name);
-        for (j = 0; j < a->nreqs; j++)
-            fprintf(f, "R %s %s\n", accts[a->reqs[j]].name, a->name);
-        for (j = 0; j < a->nhist; j++)
-            fprintf(f, "G %s %ld %s %d %d %c\n", a->name, (long)a->hist[j].t,
-                    a->hist[j].opp, a->hist[j].km, a->hist[j].okm, a->hist[j].res);
+    while (fgets(line, sizeof line, f)) {
+        char n1[64], n2[64], salt[64], hash[96];
+        long t;
+        int a1, a2, a3, a4, a5;
+
+        if (line[0] == 'A' &&
+            sscanf(line, "A %16s %32s %64s %ld %d %d %d %d %d", n1, salt, hash, &t,
+                   &a1, &a2, &a3, &a4, &a5) == 9) {
+            if (db_run("INSERT INTO players(name,salt,hash,created,played,won,lost,drawn,forfeits) "
+                       "VALUES(?,?,?,?,?,?,?,?,?)", "sssiiiiii", n1, salt, hash, (long long)t,
+                       (long long)a1, (long long)a2, (long long)a3, (long long)a4, (long long)a5) < 0)
+                goto fail;
+            na++;
+        } else if (line[0] == 'F' && sscanf(line, "F %16s %16s", n1, n2) == 2) {
+            long long x = id_by_name(n1), y = id_by_name(n2);
+            if (x >= 0 && y >= 0) {
+                if (db_run("INSERT OR IGNORE INTO friends(player_id,friend_id,since) VALUES(?,?,?)",
+                           "iii", x, y, now) < 0)
+                    goto fail;
+                nf++;
+            }
+        } else if (line[0] == 'R' && sscanf(line, "R %16s %16s", n1, n2) == 2) {
+            long long x = id_by_name(n1), y = id_by_name(n2);
+            if (x >= 0 && y >= 0) {
+                if (db_run("INSERT OR IGNORE INTO friend_requests(from_id,to_id,created) VALUES(?,?,?)",
+                           "iii", x, y, now) < 0)
+                    goto fail;
+                nr++;
+            }
+        }                               /* 'G' lines: the full archive comes from games.log */
     }
-    fflush(f);
-    fsync(fileno(f));
-    if (fclose(f) != 0 || rename(tmp, path) != 0)
-        logf_("saving %s failed: %s", path, strerror(errno));
-    g_dirty = 0;
+    fclose(f);
+    f = NULL;
+
+    f = fopen(oldlog, "r");
+    if (f) {
+        while (fgets(line, sizeof line, f)) {
+            char n1[64], n2[64], r0, r1;
+            long t;
+            int k0, k1;
+            if (sscanf(line, "%ld %16s %16s %d %d %c %c", &t, n1, n2, &k0, &k1, &r0, &r1) == 7) {
+                if (db_insert_game((time_t)t, id_by_name(n1), id_by_name(n2), n1, n2, k0, k1, r0, r1) < 0)
+                    goto fail;
+                ng++;
+            }
+        }
+        fclose(f);
+        f = NULL;
+    }
+    if (db_exec("COMMIT") < 0)
+        goto fail;
+
+    {
+        char bak[340];
+        snprintf(bak, sizeof bak, "%s.migrated", oldacc);
+        if (rename(oldacc, bak) != 0)
+            logf_("could not rename %s: %s", oldacc, strerror(errno));
+        snprintf(bak, sizeof bak, "%s.migrated", oldlog);
+        if (access(oldlog, F_OK) == 0 && rename(oldlog, bak) != 0)
+            logf_("could not rename %s: %s", oldlog, strerror(errno));
+    }
+    logf_("import done: %d accounts, %d friendships, %d requests, %d games "
+          "(old files kept as *.migrated)", na, nf, nr, ng);
+    return 0;
+
+fail:
+    if (f)
+        fclose(f);
+    db_exec("ROLLBACK");
+    logf_("import of the old text database FAILED - nothing was changed");
+    return -1;
 }
 
+/* read everything the server needs for fast lookups into accts[] */
 static void db_load(void)
 {
-    char path[320], line[512];
-    FILE *f;
+    sqlite3_stmt *st;
     int i;
 
     for (i = 0; i < MAX_ACCOUNTS; i++)
         accts[i].online = -1;
-    db_path(path, sizeof path, "accounts.db");
-    f = fopen(path, "r");
-    if (!f) {
-        logf_("no existing database in %s, starting empty", g_dir);
-        return;
-    }
-    if (!fgets(line, sizeof line, f) || strncmp(line, "HOLLYBORNES-DB", 14) != 0) {
-        logf_("%s is not a HollyBornes database - ignoring it", path);
-        fclose(f);
-        return;
-    }
-    while (fgets(line, sizeof line, f)) {
-        char n1[64], n2[64], n3[96], n4[96], rc = 0;
-        long t;
-        int a1, a2, a3, a4, a5, km, okm;
 
-        if (line[0] == 'A' && nacc < MAX_ACCOUNTS &&
-            sscanf(line, "A %16s %32s %64s %ld %d %d %d %d %d", n1, n3, n4, &t,
-                   &a1, &a2, &a3, &a4, &a5) == 9) {
-            Account *a = &accts[nacc++];
-            snprintf(a->name, sizeof a->name, "%.16s", n1);
-            snprintf(a->salt, sizeof a->salt, "%.32s", n3);
-            snprintf(a->hash, sizeof a->hash, "%.64s", n4);
-            a->created = (time_t)t;
-            a->played = a1; a->won = a2; a->lost = a3; a->drawn = a4; a->forfeits = a5;
-        } else if (line[0] == 'F' && sscanf(line, "F %16s %16s", n1, n2) == 2) {
-            int x = find_acct(n1), y = find_acct(n2);
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT id,name,salt,hash,created,played,won,lost,drawn,forfeits FROM players ORDER BY id",
+            -1, &st, NULL) == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            Account *a;
+            if (nacc >= MAX_ACCOUNTS) {
+                logf_("warning: more than %d accounts in the database; the rest are ignored", MAX_ACCOUNTS);
+                break;
+            }
+            a = &accts[nacc++];
+            memset(a, 0, sizeof *a);
+            a->online = -1;
+            a->dbid = sqlite3_column_int64(st, 0);
+            snprintf(a->name, sizeof a->name, "%.16s", (const char *)sqlite3_column_text(st, 1));
+            snprintf(a->salt, sizeof a->salt, "%.32s", (const char *)sqlite3_column_text(st, 2));
+            snprintf(a->hash, sizeof a->hash, "%.64s", (const char *)sqlite3_column_text(st, 3));
+            a->created = (time_t)sqlite3_column_int64(st, 4);
+            a->played = sqlite3_column_int(st, 5);
+            a->won = sqlite3_column_int(st, 6);
+            a->lost = sqlite3_column_int(st, 7);
+            a->drawn = sqlite3_column_int(st, 8);
+            a->forfeits = sqlite3_column_int(st, 9);
+        }
+        sqlite3_finalize(st);
+    } else {
+        db_error("load players");
+    }
+
+    if (sqlite3_prepare_v2(g_db, "SELECT player_id, friend_id FROM friends", -1, &st, NULL) == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            int x = find_by_dbid(sqlite3_column_int64(st, 0));
+            int y = find_by_dbid(sqlite3_column_int64(st, 1));
             if (x >= 0 && y >= 0 && accts[x].nfriends < MAX_FRIENDS &&
                 !list_has(accts[x].friends, accts[x].nfriends, y))
                 accts[x].friends[accts[x].nfriends++] = y;
-        } else if (line[0] == 'R' && sscanf(line, "R %16s %16s", n1, n2) == 2) {
-            int x = find_acct(n1), y = find_acct(n2);
+        }
+        sqlite3_finalize(st);
+    } else {
+        db_error("load friends");
+    }
+
+    if (sqlite3_prepare_v2(g_db, "SELECT from_id, to_id FROM friend_requests", -1, &st, NULL) == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            int x = find_by_dbid(sqlite3_column_int64(st, 0));
+            int y = find_by_dbid(sqlite3_column_int64(st, 1));
             if (x >= 0 && y >= 0 && accts[y].nreqs < MAX_REQS &&
                 !list_has(accts[y].reqs, accts[y].nreqs, x))
                 accts[y].reqs[accts[y].nreqs++] = x;
-        } else if (line[0] == 'G' &&
-                   sscanf(line, "G %16s %ld %16s %d %d %c", n1, &t, n2, &km, &okm, &rc) == 6) {
-            int x = find_acct(n1);
-            if (x >= 0 && accts[x].nhist < HIST_LEN) {
-                GameRec *g = &accts[x].hist[accts[x].nhist++];
-                g->t = (time_t)t; g->km = km; g->okm = okm; g->res = rc;
-                snprintf(g->opp, sizeof g->opp, "%.16s", n2);
-            }
         }
+        sqlite3_finalize(st);
+    } else {
+        db_error("load friend requests");
     }
-    fclose(f);
-    logf_("loaded %d accounts from %s", nacc, path);
+    logf_("loaded %d accounts", nacc);
 }
 
-static void record_game(int ai, const char *opp, int km, int okm, char res)
+/* update the totals of one account (memory + database) */
+static void record_stats(int ai, char res)
 {
     Account *a = &accts[ai];
-    GameRec *g;
 
     a->played++;
     switch (res) {
@@ -612,18 +859,11 @@ static void record_game(int ai, const char *opp, int km, int okm, char res)
     case 'L': a->lost++; break;
     case 'D': a->drawn++; break;
     case 'F': a->lost++; a->forfeits++; break;
-    default:  break;
+    default:  break;               /* 'X': played, nobody won */
     }
-    memmove(&a->hist[1], &a->hist[0], sizeof(GameRec) * (HIST_LEN - 1));
-    g = &a->hist[0];
-    g->t = time(NULL);
-    g->km = km;
-    g->okm = okm;
-    g->res = res;
-    snprintf(g->opp, sizeof g->opp, "%s", opp);
-    if (a->nhist < HIST_LEN)
-        a->nhist++;
-    g_dirty = 1;
+    db_run("UPDATE players SET played=?,won=?,lost=?,drawn=?,forfeits=? WHERE id=?", "iiiiii",
+           (long long)a->played, (long long)a->won, (long long)a->lost, (long long)a->drawn,
+           (long long)a->forfeits, a->dbid);
 }
 
 /* =========================================================================
@@ -663,21 +903,16 @@ static void finish_match(Match *m, int mode, int who)
             res[0] = res[1] = 'X';
     }
 
-    if (g_accounts) {
+    if (g_accounts) {                       /* one transaction: game row + both players' totals */
+        db_exec("BEGIN IMMEDIATE");
+        db_insert_game(time(NULL),
+                       m->acct[0] >= 0 ? accts[m->acct[0]].dbid : -1,
+                       m->acct[1] >= 0 ? accts[m->acct[1]].dbid : -1,
+                       m->name[0], m->name[1], km[0], km[1], res[0], res[1]);
         for (s = 0; s < 2; s++)
             if (m->acct[s] >= 0)
-                record_game(m->acct[s], m->name[1 - s], km[s], okm[s], res[s]);
-        {
-            char path[320];
-            FILE *f;
-            db_path(path, sizeof path, "games.log");
-            f = fopen(path, "a");
-            if (f) {
-                fprintf(f, "%ld %s %s %d %d %c %c\n", (long)time(NULL), m->name[0], m->name[1],
-                        km[0], km[1], res[0], res[1]);
-                fclose(f);
-            }
-        }
+                record_stats(m->acct[s], res[s]);
+        db_exec("COMMIT");
     }
     logf_("game finished: %s %c / %s %c (mode %d)", m->name[0], res[0], m->name[1], res[1], mode);
 }
@@ -959,8 +1194,14 @@ static void do_login(int idx, const char *name_in, const char *pw)
         random_salt(a->salt);
         hash_password(a->salt, pw, a->hash);
         a->created = time(NULL);
+        if (db_run("INSERT INTO players(name,salt,hash,created) VALUES(?,?,?,?)", "sssi",
+                   a->name, a->salt, a->hash, (long long)a->created) < 0) {
+            nacc--;                         /* nothing was stored: do not keep it in memory either */
+            queue_line(c, "ERR could not create the account (database error)");
+            return;
+        }
+        a->dbid = sqlite3_last_insert_rowid(g_db);
         is_new = 1;
-        g_dirty = 1;
         logf_("new account %s", a->name);
     }
 
@@ -990,17 +1231,34 @@ static const char *status_of(int ai)
     return "online";
 }
 
-static void make_friends(int a, int b)
+/* returns 0 on success, -1 if the database write failed (nothing changed) */
+static int make_friends(int a, int b)
 {
+    long long now = (long long)time(NULL);
+
+    if (db_exec("BEGIN IMMEDIATE") < 0)
+        return -1;
+    if (db_run("DELETE FROM friend_requests WHERE (from_id=?1 AND to_id=?2) OR (from_id=?2 AND to_id=?1)",
+               "ii", accts[a].dbid, accts[b].dbid) < 0 ||
+        db_run("INSERT OR IGNORE INTO friends(player_id,friend_id,since) VALUES(?,?,?)",
+               "iii", accts[a].dbid, accts[b].dbid, now) < 0 ||
+        db_run("INSERT OR IGNORE INTO friends(player_id,friend_id,since) VALUES(?,?,?)",
+               "iii", accts[b].dbid, accts[a].dbid, now) < 0) {
+        db_exec("ROLLBACK");
+        return -1;
+    }
+    if (db_exec("COMMIT") < 0)
+        return -1;
+
     list_del(accts[a].reqs, &accts[a].nreqs, b);
     list_del(accts[b].reqs, &accts[b].nreqs, a);
     if (!list_has(accts[a].friends, accts[a].nfriends, b))
         accts[a].friends[accts[a].nfriends++] = b;
     if (!list_has(accts[b].friends, accts[b].nfriends, a))
         accts[b].friends[accts[b].nfriends++] = a;
-    g_dirty = 1;
     notify_acct(a, "FRIENDADDED %s", accts[b].name);
     notify_acct(b, "FRIENDADDED %s", accts[a].name);
+    return 0;
 }
 
 static void cmd_friend(Client *c, char *sub, char *arg)
@@ -1018,17 +1276,21 @@ static void cmd_friend(Client *c, char *sub, char *arg)
         if (list_has(accts[me].friends, accts[me].nfriends, t)) {
             queue_line(c, "ERR already friends");
         } else if (list_has(accts[me].reqs, accts[me].nreqs, t)) {
-            make_friends(me, t);                      /* they asked first */
-            queue_line(c, "OK you are now friends with %s", accts[t].name);
+            if (make_friends(me, t) < 0)             /* they asked first */
+                queue_line(c, "ERR database error, please try again");
+            else
+                queue_line(c, "OK you are now friends with %s", accts[t].name);
         } else if (list_has(accts[t].reqs, accts[t].nreqs, me)) {
             queue_line(c, "ERR request already sent");
         } else if (accts[me].nfriends >= MAX_FRIENDS) {
             queue_line(c, "ERR your friend list is full");
         } else if (accts[t].nreqs >= MAX_REQS || accts[t].nfriends >= MAX_FRIENDS) {
             queue_line(c, "ERR that player cannot take requests right now");
+        } else if (db_run("INSERT OR IGNORE INTO friend_requests(from_id,to_id,created) VALUES(?,?,?)",
+                          "iii", accts[me].dbid, accts[t].dbid, (long long)time(NULL)) < 0) {
+            queue_line(c, "ERR database error, please try again");
         } else {
             accts[t].reqs[accts[t].nreqs++] = me;
-            g_dirty = 1;
             notify_acct(t, "FRIENDREQ %s", accts[me].name);
             queue_line(c, "OK request sent to %s", accts[t].name);
         }
@@ -1037,25 +1299,30 @@ static void cmd_friend(Client *c, char *sub, char *arg)
             queue_line(c, "ERR no request from that player");
         } else if (accts[me].nfriends >= MAX_FRIENDS || accts[t].nfriends >= MAX_FRIENDS) {
             queue_line(c, "ERR friend list is full");
+        } else if (make_friends(me, t) < 0) {
+            queue_line(c, "ERR database error, please try again");
         } else {
-            make_friends(me, t);
             queue_line(c, "OK you are now friends with %s", accts[t].name);
         }
     } else if (strcasecmp(sub, "DECLINE") == 0) {
         if (t < 0 || !list_has(accts[me].reqs, accts[me].nreqs, t)) {
             queue_line(c, "ERR no request from that player");
+        } else if (db_run("DELETE FROM friend_requests WHERE from_id=? AND to_id=?", "ii",
+                          accts[t].dbid, accts[me].dbid) < 0) {
+            queue_line(c, "ERR database error, please try again");
         } else {
             list_del(accts[me].reqs, &accts[me].nreqs, t);
-            g_dirty = 1;
             queue_line(c, "OK request declined");
         }
     } else if (strcasecmp(sub, "REMOVE") == 0) {
         if (t < 0 || !list_has(accts[me].friends, accts[me].nfriends, t)) {
             queue_line(c, "ERR not on your friend list");
+        } else if (db_run("DELETE FROM friends WHERE (player_id=?1 AND friend_id=?2) OR "
+                          "(player_id=?2 AND friend_id=?1)", "ii", accts[me].dbid, accts[t].dbid) < 0) {
+            queue_line(c, "ERR database error, please try again");
         } else {
             list_del(accts[me].friends, &accts[me].nfriends, t);
             list_del(accts[t].friends, &accts[t].nfriends, me);
-            g_dirty = 1;
             notify_acct(t, "FRIENDREMOVED %s", accts[me].name);
             queue_line(c, "OK removed %s", accts[t].name);
         }
@@ -1104,12 +1371,28 @@ static void cmd_stats(Client *c, const char *arg)
 
 static void cmd_history(Client *c, const char *arg)
 {
-    int t = target_acct(c, arg), j;
+    int t = target_acct(c, arg);
+    sqlite3_stmt *st;
+
     if (t < 0)
         return;
-    for (j = 0; j < accts[t].nhist; j++) {
-        GameRec *g = &accts[t].hist[j];
-        queue_line(c, "GAME %ld %s %d %d %c", (long)g->t, g->opp, g->km, g->okm, g->res);
+    if (sqlite3_prepare_v2(g_db,
+            "SELECT played_at,"
+            "  CASE WHEN p0_id = ?1 THEN name1 ELSE name0 END,"
+            "  CASE WHEN p0_id = ?1 THEN km0 ELSE km1 END,"
+            "  CASE WHEN p0_id = ?1 THEN km1 ELSE km0 END,"
+            "  CASE WHEN p0_id = ?1 THEN res0 ELSE res1 END "
+            "FROM games WHERE p0_id = ?1 OR p1_id = ?1 ORDER BY id DESC LIMIT ?2",
+            -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, accts[t].dbid);
+        sqlite3_bind_int64(st, 2, HIST_ROWS);
+        while (sqlite3_step(st) == SQLITE_ROW)
+            queue_line(c, "GAME %lld %s %d %d %s", (long long)sqlite3_column_int64(st, 0),
+                       (const char *)sqlite3_column_text(st, 1), sqlite3_column_int(st, 2),
+                       sqlite3_column_int(st, 3), (const char *)sqlite3_column_text(st, 4));
+        sqlite3_finalize(st);
+    } else {
+        db_error("history");
     }
     queue_line(c, "ENDHISTORY %s", accts[t].name);
 }
@@ -1431,6 +1714,8 @@ int main(int argc, char **argv)
             fprintf(stderr, "cannot create %s: %s\n", g_dir, strerror(errno));
             return 1;
         }
+        if (db_open() < 0 || db_migrate_legacy() < 0)
+            return 1;
         db_load();
     }
 
@@ -1524,13 +1809,11 @@ int main(int argc, char **argv)
                 flush_client(&clients[i]);
 
         match_sweep();
-        if (g_dirty)
-            db_save();
     }
 
     logf_("shutting down");
-    if (g_dirty)
-        db_save();
+    if (g_db)
+        sqlite3_close(g_db);
     for (i = 0; i < MAX_CLIENTS; i++)
         if (clients[i].fd >= 0)
             close(clients[i].fd);
