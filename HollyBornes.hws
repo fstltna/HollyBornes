@@ -18,10 +18,14 @@
 @REQUIRE "rapagui.hwp"
 
 @APPTITLE "HollyBornes"
-@APPVERSION "$VER: HollyBornes 1.9 (28.10.2026)"
+@APPVERSION "$VER: HollyBornes 2.1 (29.10.2026)"
 @APPAUTHOR "Marisa Giancarla"
 @APPCOPYRIGHT "(C) 2026 Marisa Giancarla - GNU GPL"
 @APPDESCRIPTION "The classic French road-race card game"
+
+; Unique identifier: Hollywood needs it to know where to keep the saved settings
+; (SavePrefs / LoadPrefs). Do not change it, or the saved settings are not found.
+@APPIDENTIFIER "club.gameplayer.millebornes.hollybornes"
 
 ; Application icon: shown in the window border and task bar, and embedded in
 ; executables compiled on Windows and macOS. The PNG files live in the "icons"
@@ -89,6 +93,11 @@ G.sn = {}             ; what the friends list currently shows (for selection)
 G.sk = {}
 G.sc = 0
 G.fsel = -1
+G.prefs = {}          ; saved settings (see p_DefaultPrefs)
+G.pendHost = ""       ; server and port of the connection being set up
+G.pendPort = ""
+G.sentName = ""       ; name and password sent with the last HELLO / LOGIN
+G.sentPw = ""
 G.sndok = False       ; the card sound was created successfully
 G.sndon = True        ; sound switched on (Game menu)
 G.pop = ""            ; lines collected for popups (history, leaderboard)
@@ -206,6 +215,64 @@ EndFunction
 ;  GAME STATE
 ; ============================================================================
 ; ============================================================================
+;  SAVED SETTINGS  (server, port, name, password and sound; kept between runs)
+; ============================================================================
+Function p_DefaultPrefs()
+   Return({host = "millebornes.gameplayer.club", port = "5555", name = "Player", password = "", sound = 1})
+EndFunction
+
+; Start from the defaults and let LoadPrefs() overwrite whatever was saved.
+; If nothing was saved yet, or the file is unreadable, the defaults stay.
+Function p_LoadSettings()
+   G.prefs = p_DefaultPrefs()
+   ExitOnError(False)
+   LoadPrefs(G.prefs)
+   ExitOnError(True)
+EndFunction
+
+Function p_SaveSettings()
+   ExitOnError(False)
+   SavePrefs(G.prefs)
+   ExitOnError(True)
+EndFunction
+
+; show the settings in the window
+Function p_ApplySettings()
+   moai.Set("host", "text", p_S$(G.prefs.host))
+   moai.Set("port", "text", p_S$(G.prefs.port))
+   moai.Set("pname", "text", p_S$(G.prefs.name))
+   moai.Set("pass", "text", p_S$(G.prefs.password))
+   If G.prefs.sound = 0
+      G.sndon = False
+   Else
+      G.sndon = True
+   EndIf
+EndFunction
+
+; the server accepted us: remember where we connected. A guest connection also
+; remembers the name (with no password); for an account, the name and password
+; are remembered together once the login succeeds (see LOGGEDIN), so a mistyped
+; password never replaces a working one.
+Function p_RememberConnection()
+   G.prefs.host = G.pendHost
+   G.prefs.port = G.pendPort
+   If G.sentPw = ""
+      G.prefs.name = G.sentName
+      G.prefs.password = ""
+   EndIf
+   p_SaveSettings()
+EndFunction
+
+Function p_RestoreDefaults()
+   G.prefs = p_DefaultPrefs()
+   p_ApplySettings()
+   moai.Set("room", "text", "")
+   p_SaveSettings()
+   p_Log("Settings restored to the defaults: server millebornes.gameplayer.club, port 5555, name Player, no saved password, sound on.")
+   p_PlayUI()
+EndFunction
+
+; ============================================================================
 ;  SOUND  (the card sound is synthesised at startup, so no sound file is needed)
 ; ============================================================================
 Function p_InitSound()
@@ -223,7 +290,8 @@ Function p_InitSound()
       env = env * 0.9975                    ; fast decay
    Next
    ExitOnError(False)
-   CreateSample(1, t, 22050)
+   CreateSample(1, t, 22050)           ; card played
+   CreateSample(2, t, 27781)           ; everything else: the same snap, 4 semitones higher (22050 * 2^(4/12))
    err = GetLastError()
    ExitOnError(True)
    If err = 0 Then G.sndok = True
@@ -233,6 +301,17 @@ Function p_PlaySound()
    If G.sndok = True And G.sndon = True Then PlaySample(1)
 EndFunction
 
+; The "something happened" sound for everything that is not a card being played.
+Function p_PlayUI()
+   If G.sndok = True And G.sndon = True Then PlaySample(2)
+EndFunction
+
+; log a message about something that did not work, with the UI sound
+Function p_Warn(m$)
+   p_Log(m$)
+   p_PlayUI()
+EndFunction
+
 Function p_ToggleSound()
    If G.sndok = False
       p_Log("Sound is not available on this system.")
@@ -240,12 +319,15 @@ Function p_ToggleSound()
    EndIf
    If G.sndon = True
       G.sndon = False
+      G.prefs.sound = 0
       p_Log("Sound off.")
    Else
       G.sndon = True
+      G.prefs.sound = 1
       p_Log("Sound on.")
-      p_PlaySound()
+      p_PlayUI()
    EndIf
+   p_SaveSettings()
 EndFunction
 
 Function p_NewPlayer()
@@ -414,6 +496,7 @@ Function p_Finish()
       msg$ = p_Who$(1) .. " wins.  " .. p_S$(G.P[1].km) .. " km to " .. p_S$(G.P[0].km) .. " km."
    EndIf
    p_Log("*** GAME OVER: " .. msg$)
+   p_PlayUI()
    If G.mode = 1
       p_NetSend("RESULT " .. G.P[0].km .. " " .. G.P[1].km)
       p_NetSend("LEAVE")   ; back to the server lobby
@@ -524,6 +607,7 @@ Function p_AITurn()
          c = G.P[1].hand[best]
          p_Remove(1, best)
          p_Log("Computer discarded " .. p_Short$(c))
+      p_PlayUI()
       EndIf
 
       If p_CheckEnd() = True Then Return
@@ -549,17 +633,17 @@ Function p_HumanPlay()
    Local c, extra, slot
    If G.over = True Then Return
    If G.myturn = False
-      p_Log("It's not your turn yet.")
+      p_Warn("It's not your turn yet.")
       Return
    EndIf
    If G.sel < 0 Or G.sel >= G.P[0].hn
-      p_Log("Choose a card first: press its number (1-7) under your hand.")
+      p_Warn("Choose a card first: press its number (1-7) under your hand.")
       Return
    EndIf
    slot = G.sel
    c = G.P[0].hand[slot]
    If p_CanPlay(0, c) = False
-      p_Log("You can't play " .. p_Short$(c) .. " right now. Discard it?")
+      p_Warn("You can't play " .. p_Short$(c) .. " right now. Discard it?")
       Return
    EndIf
    p_Remove(0, slot)
@@ -584,17 +668,18 @@ Function p_HumanDiscard()
    Local c, slot
    If G.over = True Then Return
    If G.myturn = False
-      p_Log("It's not your turn yet.")
+      p_Warn("It's not your turn yet.")
       Return
    EndIf
    If G.sel < 0 Or G.sel >= G.P[0].hn
-      p_Log("Choose a card first: press its number (1-7) under your hand.")
+      p_Warn("Choose a card first: press its number (1-7) under your hand.")
       Return
    EndIf
    slot = G.sel
    c = G.P[0].hand[slot]
    p_Remove(0, slot)
    p_Log("You discarded " .. p_Short$(c))
+   p_PlayUI()
    If G.mode = 1 Then p_NetSend("MOVE D " .. slot)
    If p_CheckEnd() = True Then Return
    If G.mode = 1
@@ -693,11 +778,12 @@ EndFunction
 Function p_SelectCard(i)
    If G.over = True Then Return
    If i >= G.P[0].hn
-      p_Log("You only have " .. p_S$(G.P[0].hn) .. " cards.")
+      p_Warn("You only have " .. p_S$(G.P[0].hn) .. " cards.")
       Return
    EndIf
    G.sel = i
    p_ShowHand()
+   p_PlayUI()
 EndFunction
 
 Function p_Refresh()
@@ -792,6 +878,8 @@ Function p_SendIntro()
    pw$ = moai.Get("pass", "text")
    If name$ = "" Then name$ = "Player"
    G.myname = name$
+   G.sentName = name$
+   G.sentPw = pw$
    If pw$ = ""
       p_NetSend("HELLO " .. name$)       ; guest: no stats, no friends
    Else
@@ -822,6 +910,8 @@ Function p_FindMatch()
       G.net = True
       G.rx = ""
       p_ResetSession()
+      G.pendHost = host$
+      G.pendPort = p_S$(port)
    EndIf
    If G.welcomed = False Then p_SendIntro()
    If room$ = ""
@@ -903,6 +993,8 @@ Function p_Connect()
       G.net = True
       G.rx = ""
       p_ResetSession()
+      G.pendHost = host$
+      G.pendPort = p_S$(port)
    EndIf
    If G.welcomed = False Then p_SendIntro()
 EndFunction
@@ -941,6 +1033,7 @@ Function p_StartNet(seat, opp$, csv$)
    G.sel = -1
    moai.DoMethod("log", "clear")
    p_Log("Match found! You are playing " .. opp$ .. ".")
+   p_PlayUI()
    If seat = 0
       p_Draw(0)
       G.myturn = True
@@ -990,6 +1083,7 @@ Function p_OppMove(kind$, slot)
             extra = p_Apply(1, c)
          Else
             p_Log(G.oppname .. " discarded " .. p_Short$(c))
+            p_PlayUI()
          EndIf
       EndIf
    EndIf
@@ -1022,9 +1116,13 @@ Function p_NetLine(line$)
       G.welcomed = True
       p_Log("Connected to the server.")
       p_UpdateLoginStatus()
+      p_RememberConnection()
    Case "LOGGEDIN":
       If c >= 8
          G.login = f[1]
+         G.prefs.name = f[1]                ; the account's own spelling
+         G.prefs.password = G.sentPw
+         p_SaveSettings()
          G.lsuffix = "  (" .. f[2] .. " games, " .. f[3] .. " won)"
          p_UpdateLoginStatus()
          If f[7] = "NEW"
@@ -1033,10 +1131,12 @@ Function p_NetLine(line$)
          Else
             p_Log("Logged in as " .. f[1] .. ": " .. f[2] .. " games, " .. f[3] .. " won, " .. f[4] .. " lost.")
          EndIf
+         p_PlayUI()
          p_NetSend("FRIENDS")
       EndIf
    Case "WAIT":
       p_Log("Searching for an opponent... (press New game to cancel)")
+      p_PlayUI()
    Case "MATCH":
       If c >= 4 Then p_StartNet(ToNumber(f[1]), f[2], f[3])
    Case "OPP":
@@ -1047,6 +1147,7 @@ Function p_NetLine(line$)
       If G.mode = 1 And G.over = False
          G.over = True
          p_Log("*** " .. G.oppname .. " left the game.")
+         p_PlayUI()
          p_Refresh()
          moai.Request("Game over", G.oppname .. " left the game.", "OK")
       EndIf
@@ -1058,15 +1159,19 @@ Function p_NetLine(line$)
       p_ShowFriends()
    Case "FRIENDREQ":
       If c >= 2 Then p_Log(f[1] .. " sent you a friend request.")
+      p_PlayUI()
       p_NetSend("FRIENDS")
    Case "FRIENDADDED":
       If c >= 2 Then p_Log("You and " .. f[1] .. " are now friends.")
+      p_PlayUI()
       p_NetSend("FRIENDS")
    Case "FRIENDREMOVED":
       If c >= 2 Then p_Log(f[1] .. " removed you from their friends.")
+      p_PlayUI()
       p_NetSend("FRIENDS")
    Case "FRIENDON":
       If c >= 2 Then p_Log("Your friend " .. f[1] .. " is online.")
+      p_PlayUI()
       p_NetSend("FRIENDS")
    Case "FRIENDOFF":
       p_NetSend("FRIENDS")
@@ -1084,8 +1189,10 @@ Function p_NetLine(line$)
       p_ShowPopup("Leaderboard", "No games recorded yet.")
    Case "OK":
       p_Log(line$)
+      p_PlayUI()
    Case "ERR":
       p_Log("Server: " .. line$)
+      p_PlayUI()
       If G.welcomed = False Then moai.Set("lstat", "text", "Status: not logged in - " .. line$)
    EndSwitch
 EndFunction
@@ -1235,12 +1342,15 @@ Function p_Event(msg)
          Switch msg.id
          Case "mnew":
             p_NewGameAI()
+            p_PlayUI()
          Case "mfind":
             p_FindMatch()
          Case "mrules":
             p_Rules()
          Case "msound":
             p_ToggleSound()
+         Case "mdefaults":
+            p_RestoreDefaults()
          Case "mabout":
             p_About()
          Case "mquit":
@@ -1282,11 +1392,13 @@ Function p_Event(msg)
             p_HumanDiscard()
          Case "bnew":
             p_NewGameAI()
+            p_PlayUI()
          Case "bfind":
             p_FindMatch()
          Case "bdisc":
             p_NewGameAI()
             p_NetClose()
+            p_PlayUI()
          Case "bconn":
             p_Connect()
          Case "bfadd":
@@ -1324,6 +1436,7 @@ moai.CreateApp([[
          <item id="mfind">Find online opponent</item>
          <item id="mrules">Rules...</item>
          <item id="msound">Sound on / off</item>
+         <item id="mdefaults">Restore default settings</item>
          <item id="mabout">About...</item>
          <item/>
          <item id="mquit" shortcut="Ctrl+Q">Quit</item>
@@ -1432,7 +1545,7 @@ moai.CreateApp([[
          <hgroup>
             <image brush="1"/>
             <vgroup>
-               <text>HollyBornes 1.9</text>
+               <text>HollyBornes 2.1</text>
                <text> </text>
                <text>A Hollywood take on the classic French road-race</text>
                <text>card game Mille Bornes, written in Hollywood</text>
@@ -1455,6 +1568,8 @@ moai.CreateApp([[
 
 InstallEventHandler({RapaGUI = p_Event, OnReceiveData = p_NetEvent, OnDisconnect = p_NetEvent})
 
+p_LoadSettings()
+p_ApplySettings()
 p_InitSound()
 p_NewGameAI()
 
