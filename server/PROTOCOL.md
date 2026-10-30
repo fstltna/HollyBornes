@@ -38,7 +38,7 @@ Both clients run the same rules engine on the same deck and apply the same moves
 | `MOVE P <slot>` | Play the card in hand slot `slot` (0-6). |
 | `MOVE D <slot>` | Discard the card in hand slot `slot` (0-6). |
 | `MOVE X` | Pass (no cards left because the draw pile is empty). |
-| `RESULT <my km> <opponent km>` | Report the final distances when a game ends (0-1000 each). See "How results are recorded". |
+| `RESULT <my km> <opponent km> [<turns>]` | Report the final distances (0-1000 each) and, optionally, the number of turns played (1-9999) when a game ends. See "How results are recorded". |
 | `STATS [name]` | Account mode. Totals for a player (yourself if no name). |
 | `HISTORY [name]` | Account mode. The last 10 games of a player (yourself if no name). |
 | `LEADERS` | Account mode. Top 10 players by wins. |
@@ -60,7 +60,8 @@ Both clients run the same rules engine on the same deck and apply the same moves
 | `MATCH <seat> <opponent> <deck>` | Match found. `seat` is `0` (moves first) or `1`. `deck` is 106 comma-separated card numbers. |
 | `OPP P <slot>` / `OPP D <slot>` / `OPP X` | The opponent's move. |
 | `OPPLEFT` | The opponent left or disconnected. The match is over and you are back in the lobby. |
-| `STATS <name> <played> <won> <lost> <drawn> <forfeits>` | Reply to `STATS`. |
+| `STATS <name> <played> <won> <lost> <drawn> <forfeits> <best turns>` | Reply to `STATS`. `best turns` is the fewest turns in a completed win, or `0` if there is none yet. |
+| `RECORD <turns> <previous>` | You just set a new personal record for the fewest turns in a completed win. `previous` is the old record, or `0` if this was your first. |
 | `GAME <unix time> <opponent> <my km> <opponent km> <result>` ... `ENDHISTORY <name>` | Reply to `HISTORY`, newest first. Result is `W` won, `L` lost, `D` draw, `F` forfeited, `X` disputed. |
 | `LEADER <rank> <name> <won> <played>` ... `ENDLEADERS` | Reply to `LEADERS`. |
 | `FRIEND <name> <online\|offline\|queued\|playing>` ... `REQUEST <name>` ... `ENDFRIENDS` | Reply to `FRIENDS`. |
@@ -90,6 +91,16 @@ The server cannot see the game, so it relies on the two clients:
 4. If a player leaves or disconnects **without** reporting while the game is still running, they **forfeit**: a loss and a forfeit for them, a win for the other player.
 5. If only one player reports and the other leaves or does not report within 120 seconds, the single report is used.
 
+**Turns and the fewest-turns record.** A *turn* is one move: a card played or discarded by either player, so the count covers the whole game. A safety card's bonus move counts as its own turn; a pass (`MOVE X`, when a player has no cards left) does not. Both clients count identically because they apply the same moves in the same order.
+
+A game updates the winner's record (`players.best_turns`) only when **all** of these hold:
+
+- both players reported, their distances agree, and they reported the **same** turn count;
+- the winner reached exactly **1000 km** (a completed trip, not a win on distance when the draw pile ran out);
+- the winner is a registered account (not a guest).
+
+The record changes only if it is the winner's first one, or the new turn count is **lower** than the current record (equal does not count). When it changes, the server sends the winner `RECORD <turns> <previous>`. Games without an agreed turn count (an older client, disagreeing reports, a forfeit) are still recorded as games but never touch the record.
+
 Only players logged in with an account have their games recorded. Games against the computer are never reported.
 
 Because results are reported by the clients, two players working together could fake a result. This is meant for friendly play, not ranked tournaments.
@@ -100,16 +111,18 @@ Account mode keeps everything in one SQLite database, `hollybornes.db`, inside t
 
 | Table | Columns |
 |-------|---------|
-| `players` | `id`, `name` (unique, case-insensitive), `salt`, `hash`, `created`, `played`, `won`, `lost`, `drawn`, `forfeits` |
+| `players` | `id`, `name` (unique, case-insensitive), `salt`, `hash`, `created`, `played`, `won`, `lost`, `drawn`, `forfeits`, `best_turns` (NULL until a first completed win) |
 | `friends` | `player_id`, `friend_id`, `since` (one row per direction) |
 | `friend_requests` | `from_id`, `to_id`, `created` |
-| `games` | `id`, `played_at`, `p0_id`, `p1_id` (NULL for a guest), `name0`, `name1`, `km0`, `km1`, `res0`, `res1`. Player 0 is seat 0. |
+| `games` | `id`, `played_at`, `p0_id`, `p1_id` (NULL for a guest), `name0`, `name1`, `km0`, `km1`, `res0`, `res1`, `turns` (NULL when unknown or not agreed). Player 0 is seat 0. |
 
 `HISTORY` returns the newest 10 rows of `games` for a player, flipped to that player's point of view. For a disputed game each side's own reported distance is stored.
 
 Passwords are never stored. The server keeps a random 16-byte salt and a salted, iterated (5000 rounds) SHA-256 hash per account.
 
-The schema version is kept in `PRAGMA user_version` (currently 1). A server refuses to open a database from a newer version.
+The schema version is kept in `PRAGMA user_version` (currently 2). A server refuses to open a database from a newer version.
+
+**Upgrade from schema 1.** A version-1 database (before turn records) is upgraded in place the first time the newer server opens it, in one transaction: `players.best_turns` and `games.turns` are added and start out NULL, so existing players have no record until their next completed win. Nothing else is changed.
 
 **Import of the old text format.** Earlier versions stored `accounts.db` and `games.log` as text files. When the data directory has such a file and the SQLite database has no players yet, the server imports it once at start-up (in a single transaction) and renames the old files to `*.migrated`.
 

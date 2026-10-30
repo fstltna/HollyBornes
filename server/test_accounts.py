@@ -50,6 +50,17 @@ class C:
                 if l is None or l.startswith(prefix): return l
         except socket.timeout:
             return None
+    def peek(s, prefix, t=0.6):
+        """a line starting with prefix if one arrives within t seconds, else None"""
+        s.s.settimeout(t)
+        try:
+            while True:
+                l = s.line()
+                if l is None or l.startswith(prefix): return l
+        except socket.timeout:
+            return None
+        finally:
+            s.s.settimeout(2)
     def closed(s):
         """drain pending data; True if the server closed the connection"""
         s.s.settimeout(1)
@@ -99,9 +110,9 @@ try:
     a.send("RESULT 1000 650"); b.send("RESULT 650 1000")
     a.send("LEAVE"); b.send("LEAVE")
     time.sleep(0.2)
-    a.send("STATS"); check(a.wait("STATS") == "STATS alice 1 1 0 0 0", "winner stats: 1 played, 1 won")
-    b.send("STATS alice"); check(b.wait("STATS") == "STATS alice 1 1 0 0 0", "anyone can look up stats by name")
-    b.send("STATS"); check(b.wait("STATS") == "STATS bob 1 0 1 0 0", "loser stats: 1 played, 1 lost")
+    a.send("STATS"); check(a.wait("STATS") == "STATS alice 1 1 0 0 0 0", "winner stats: 1 played, 1 won")
+    b.send("STATS alice"); check(b.wait("STATS") == "STATS alice 1 1 0 0 0 0", "anyone can look up stats by name")
+    b.send("STATS"); check(b.wait("STATS") == "STATS bob 1 0 1 0 0 0", "loser stats: 1 played, 1 lost")
     a.send("HISTORY"); h = a.until("ENDHISTORY")
     gm = [x for x in h if x.startswith("GAME")]
     check(len(gm) == 1 and gm[0].split()[2:] == ["bob", "1000", "650", "W"], "history shows the game with opponent and km")
@@ -112,27 +123,27 @@ try:
     check(b.wait("OPPLEFT") == "OPPLEFT", "opponent told about the leave")
     b.send("LEAVE")
     time.sleep(0.2)
-    a.send("STATS"); check(a.wait("STATS") == "STATS alice 2 1 1 0 1", "leaver gets a loss and a forfeit")
-    b.send("STATS"); check(b.wait("STATS") == "STATS bob 2 1 1 0 0", "other player gets the win")
+    a.send("STATS"); check(a.wait("STATS") == "STATS alice 2 1 1 0 1 0", "leaver gets a loss and a forfeit")
+    b.send("STATS"); check(b.wait("STATS") == "STATS bob 2 1 1 0 0 0", "other player gets the win")
 
     # ---- game 3: reports disagree -> played, no winner
     play_match(a, b)
     a.send("RESULT 1000 500"); b.send("RESULT 1000 500")
     a.send("LEAVE"); b.send("LEAVE"); time.sleep(0.2)
-    a.send("STATS"); check(a.wait("STATS") == "STATS alice 3 1 1 0 1", "disputed game counts as played only")
+    a.send("STATS"); check(a.wait("STATS") == "STATS alice 3 1 1 0 1 0", "disputed game counts as played only")
 
     # ---- game 4: finished game then drawn, plus one player disappears after reporting
     play_match(a, b)
     a.send("RESULT 400 400"); b.send("RESULT 400 400")
     a.send("LEAVE"); b.send("LEAVE"); time.sleep(0.2)
-    a.send("STATS"); check(a.wait("STATS") == "STATS alice 4 1 1 1 1", "draw recorded")
+    a.send("STATS"); check(a.wait("STATS") == "STATS alice 4 1 1 1 1 0", "draw recorded")
 
     # ---- game 5: only one side reports, then both leave -> single report is used
     play_match(a, b)
     a.send("RESULT 1000 300"); a.send("LEAVE")
     check(b.wait("OPPLEFT") == "OPPLEFT", "opponent notified")
     b.send("LEAVE"); time.sleep(0.2)
-    a.send("STATS"); check(a.wait("STATS") == "STATS alice 5 2 1 1 1", "single report accepted when the other side never reports")
+    a.send("STATS"); check(a.wait("STATS") == "STATS alice 5 2 1 1 1 0", "single report accepted when the other side never reports")
 
     # ---- leaderboard
     a.send("LEADERS"); lb = a.until("ENDLEADERS")
@@ -176,6 +187,7 @@ check(not os.path.exists(os.path.join(DATA, "accounts.db")) and not os.path.exis
       "no old text files are written any more")
 con = sqlite3.connect("file:%s?mode=ro" % DBFILE, uri=True)
 check(con.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "SQLite integrity check passes")
+check(con.execute("PRAGMA user_version").fetchone()[0] == 2, "fresh database has schema version 2")
 check(con.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 3, "three accounts stored (alice, bob, carol)")
 check(con.execute("SELECT COUNT(*) FROM games").fetchone()[0] == 5, "all five games stored in the games table")
 row = con.execute("SELECT played, won, lost, drawn, forfeits FROM players WHERE name = 'alice'").fetchone()
@@ -260,6 +272,146 @@ finally:
 check(open(BADD + "/accounts.db").read().startswith("this is not"), "the unrelated file was left untouched")
 shutil.rmtree(BADD, ignore_errors=True)
 
+# ---------------------------------------------------------------- turn records
+TR = tempfile.mkdtemp(prefix="hollyturns")
+srv = start("-d", TR)
+try:
+    r, sm = C(), C()
+    r.login("rita", "rita-pass"); sm.login("sam", "sam-pass")
+
+    def game(winner, loser, wkm=1000, lkm=300, wturns=None, lturns=None):
+        play_match(winner, loser)
+        winner.send("RESULT %d %d%s" % (wkm, lkm, "" if wturns is None else " %d" % wturns))
+        loser.send("RESULT %d %d%s" % (lkm, wkm, "" if lturns is None else " %d" % lturns))
+        winner.send("LEAVE"); loser.send("LEAVE"); time.sleep(0.25)
+
+    def best(c, who):
+        c.send("STATS " + who)
+        return int(c.wait("STATS").split()[7])
+
+    game(r, sm, wturns=40, lturns=40)
+    check(r.wait("RECORD") == "RECORD 40 0", "first completed win sets the record and tells the winner (RECORD 40 0)")
+    check(best(r, "rita") == 40, "STATS shows the winner's best turns: 40")
+    check(best(r, "sam") == 0, "the loser gets no record")
+
+    game(r, sm, wturns=55, lturns=55)
+    check(r.peek("RECORD") is None and best(r, "rita") == 40, "a win with MORE turns (55) does not replace the record")
+    game(r, sm, wturns=40, lturns=40)
+    check(r.peek("RECORD") is None and best(r, "rita") == 40, "a win with EQUAL turns (40) does not replace the record")
+    game(r, sm, wturns=33, lturns=33)
+    check(r.wait("RECORD") == "RECORD 33 40" and best(r, "rita") == 33, "a win with FEWER turns (33) replaces it and reports the old record (RECORD 33 40)")
+
+    game(sm, r, wturns=20, lturns=20)
+    check(sm.wait("RECORD") == "RECORD 20 0" and best(sm, "sam") == 20 and best(sm, "rita") == 33,
+          "records are kept per player: sam gets his own first record (20), rita keeps 33")
+
+    game(r, sm, wturns=10, lturns=11)
+    check(r.peek("RECORD") is None and best(r, "rita") == 33, "reports that disagree on the turn count are not trusted: no record")
+    game(r, sm)                                                    # an older client: no turn count at all
+    check(r.peek("RECORD") is None and best(r, "rita") == 33, "a result without a turn count never sets a record")
+    game(r, sm, wkm=900, lkm=500, wturns=10, lturns=10)           # won on distance when the deck ran out
+    check(r.peek("RECORD") is None and best(r, "rita") == 33, "a win that did not reach 1000 km does not count for the record")
+    game(r, sm, wkm=400, lkm=400, wturns=5, lturns=5)
+    check(r.peek("RECORD") is None and best(r, "rita") == 33, "a draw sets no record")
+
+    play_match(r, sm); sm.send("LEAVE")                           # forfeit
+    check(r.wait("OPPLEFT") == "OPPLEFT", "forfeit scenario started")
+    r.send("RESULT 1000 100 8"); r.send("LEAVE"); time.sleep(0.25)
+    check(r.peek("RECORD") is None and best(r, "rita") == 33, "a forfeit win (single report) sets no record")
+
+    play_match(r, sm)                                              # bad turn arguments
+    for bad in ("0", "abc", "99999", "-4"):
+        r.send("RESULT 1000 300 " + bad)
+        check(r.wait("ERR") is not None, "RESULT with turns '%s' is rejected" % bad)
+    r.send("RESULT 1000 300 30"); sm.send("RESULT 300 1000 30"); r.send("LEAVE"); sm.send("LEAVE"); time.sleep(0.25)
+    check(r.wait("RECORD") == "RECORD 30 33", "a valid result after rejected ones still works (RECORD 30 33)")
+
+    g = C(); g.send("HELLO guesty"); g.wait("WELCOME")            # a guest wins against an account
+    game(g, sm, wturns=15, lturns=15)
+    check(best(sm, "sam") == 20 and sm.peek("RECORD") is None, "a guest winning records nothing and does not disturb the account")
+    game(r, g, wturns=45, lturns=45)
+    check(best(r, "rita") == 30 and r.peek("RECORD") is None, "an account beating a guest in MORE turns (45) keeps its record of 30")
+    game(r, g, wturns=25, lturns=25)
+    check(r.wait("RECORD") == "RECORD 25 30" and best(r, "rita") == 25, "...and beating a guest in FEWER turns (25) sets a new record (RECORD 25 30)")
+finally:
+    stop(srv)
+
+srv = start("-d", TR)                                                # the records survive a restart
+try:
+    x = C(); x.login("rita", "rita-pass")
+    x.send("STATS"); check(x.wait("STATS").split()[7] == "25", "best turns survive a server restart")
+finally:
+    stop(srv)
+con = sqlite3.connect("file:%s/hollybornes.db?mode=ro" % TR, uri=True)
+check(dict(con.execute("SELECT name, best_turns FROM players")) == {"rita": 25, "sam": 20}, "players.best_turns in the database: rita 25, sam 20")
+tl = [r_[0] for r_ in con.execute("SELECT turns FROM games ORDER BY id")]
+check(tl[:5] == [40, 55, 40, 33, 20] and tl[5] is None and tl[6] is None and tl[7] == 10 and tl[8] == 5,
+      "games.turns stores the agreed turn count, and NULL when unknown or disputed: %s" % (tl,))
+con.close()
+shutil.rmtree(TR, ignore_errors=True)
+
+# ---------------------------------------------------------------- upgrade of an existing version-1 database
+V1 = tempfile.mkdtemp(prefix="hollyv1")
+con = sqlite3.connect(V1 + "/hollybornes.db")
+con.executescript("""
+CREATE TABLE players (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, salt TEXT NOT NULL,
+  hash TEXT NOT NULL, created INTEGER NOT NULL, played INTEGER NOT NULL DEFAULT 0, won INTEGER NOT NULL DEFAULT 0,
+  lost INTEGER NOT NULL DEFAULT 0, drawn INTEGER NOT NULL DEFAULT 0, forfeits INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE friends (player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  friend_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE, since INTEGER NOT NULL,
+  PRIMARY KEY (player_id, friend_id)) WITHOUT ROWID;
+CREATE TABLE friend_requests (from_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  to_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE, created INTEGER NOT NULL,
+  PRIMARY KEY (from_id, to_id)) WITHOUT ROWID;
+CREATE TABLE games (id INTEGER PRIMARY KEY, played_at INTEGER NOT NULL,
+  p0_id INTEGER REFERENCES players(id) ON DELETE SET NULL, p1_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+  name0 TEXT NOT NULL, name1 TEXT NOT NULL, km0 INTEGER NOT NULL, km1 INTEGER NOT NULL,
+  res0 TEXT NOT NULL, res1 TEXT NOT NULL);
+CREATE INDEX games_p0 ON games(p0_id, id); CREATE INDEX games_p1 ON games(p1_id, id);
+PRAGMA user_version = 1;
+""")
+sv = "00112233445566778899aabbccddeeff"
+con.execute("INSERT INTO players(name,salt,hash,created,played,won,lost) VALUES('vera',?,?,1700000000,4,3,1)", (sv, legacy_hash(sv, "vera-pass")))
+con.execute("INSERT INTO games(played_at,p0_id,p1_id,name0,name1,km0,km1,res0,res1) VALUES(1700000500,1,NULL,'vera','old',1000,200,'W','L')")
+con.commit(); con.close()
+srv = start("-d", V1)
+try:
+    v, wes = C(), C()
+    w, l = v.login("vera", "vera-pass"); wes.login("wes", "wes-pass")
+    check(l == "LOGGEDIN vera 4 3 1 0 0 RETURNING", "players of a version-1 database keep their data after the upgrade: " + str(l))
+    v.send("STATS"); check(v.wait("STATS") == "STATS vera 4 3 1 0 0 0", "upgraded accounts start with no turn record")
+    v.send("HISTORY"); hh = [x.split()[2:] for x in v.until("ENDHISTORY") if x.startswith("GAME")]
+    check(hh == [["old", "1000", "200", "W"]], "old games are still in the history: " + str(hh))
+    play_match(v, wes)
+    v.send("RESULT 1000 100 28"); wes.send("RESULT 100 1000 28"); v.send("LEAVE"); wes.send("LEAVE"); time.sleep(0.25)
+    check(v.wait("RECORD") == "RECORD 28 0", "turn records work on an upgraded database")
+finally:
+    out = stop(srv)
+check("upgraded from schema 1 to 2" in out, "server logged the schema upgrade")
+con = sqlite3.connect("file:%s/hollybornes.db?mode=ro" % V1, uri=True)
+check(con.execute("PRAGMA user_version").fetchone()[0] == 2 and con.execute("PRAGMA integrity_check").fetchone()[0] == "ok",
+      "upgraded database is at schema version 2 and passes the integrity check")
+check(con.execute("SELECT turns FROM games WHERE id = 1").fetchone()[0] is None, "the old game row has turns NULL (unknown)")
+con.close()
+srv = start("-d", V1)                                                # second start: no second upgrade
+out = stop(srv)
+check("upgraded" not in out, "no second upgrade on the next start")
+shutil.rmtree(V1, ignore_errors=True)
+
+# a database from a NEWER server must be refused, not damaged
+NW = tempfile.mkdtemp(prefix="hollynew")
+con = sqlite3.connect(NW + "/hollybornes.db"); con.execute("PRAGMA user_version = 9"); con.execute("CREATE TABLE keepme(x)"); con.commit(); con.close()
+p_ = subprocess.Popen([BIN, str(PORT), "-d", NW], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+try:
+    out_, _ = p_.communicate(timeout=3)
+except subprocess.TimeoutExpired:
+    p_.kill(); out_ = "(server kept running)"
+check(p_.returncode == 1 and "newer version" in out_, "a database from a newer version is refused: " + out_.strip()[:70])
+con = sqlite3.connect(NW + "/hollybornes.db")
+check(con.execute("SELECT name FROM sqlite_master WHERE name='keepme'").fetchone() is not None, "...and left untouched")
+con.close()
+shutil.rmtree(NW, ignore_errors=True)
+
 # ---------------------------------------------------------------- crash safety
 CR = tempfile.mkdtemp(prefix="hollycrash")
 srv = start("-d", CR)
@@ -276,7 +428,7 @@ srv = start("-d", CR)
 try:
     a2 = C(); w, l = a2.login("anna", "crash-pw1")
     a2.send("FRIENDS"); fr = a2.until("ENDFRIENDS")
-    check(before == "STATS anna 3 3 0 0 0" and l.startswith("LOGGEDIN anna 3 3 0 0 0"),
+    check(before == "STATS anna 3 3 0 0 0 0" and l.startswith("LOGGEDIN anna 3 3 0 0 0"),
           "recorded games survive kill -9 (%s)" % before)
     check("FRIEND ben offline" in fr, "friendships survive kill -9")
 finally:

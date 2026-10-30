@@ -83,6 +83,8 @@
 #define MAX_REQS       20
 #define HIST_ROWS      10   /* games returned by HISTORY */
 #define DB_FILE        "hollybornes.db"
+#define DB_VERSION     2    /* 2 = adds players.best_turns and games.turns */
+#define MAX_TURNS      9999
 #define HASH_ROUNDS    5000
 
 /* =========================================================================
@@ -281,6 +283,7 @@ typedef struct {
     char    hash[65];
     time_t  created;
     int     played, won, lost, drawn, forfeits;
+    int     best_turns;        /* fewest turns in a completed win; 0 = none yet */
     int     friends[MAX_FRIENDS];
     int     nfriends;
     int     reqs[MAX_REQS];    /* incoming friend requests (account indices) */
@@ -295,6 +298,7 @@ typedef struct {
     char   name[2][NAME_LEN + 1];
     int    left[2], reported[2];
     int    km[2], okm[2];      /* what each side reported: my km, opponent km */
+    int    turns[2];           /* turn count each side reported (0 = not given) */
     time_t first_report;
 } Match;
 
@@ -481,7 +485,8 @@ static const char SCHEMA[] =
     "  won INTEGER NOT NULL DEFAULT 0,"
     "  lost INTEGER NOT NULL DEFAULT 0,"
     "  drawn INTEGER NOT NULL DEFAULT 0,"
-    "  forfeits INTEGER NOT NULL DEFAULT 0);"
+    "  forfeits INTEGER NOT NULL DEFAULT 0,"
+    "  best_turns INTEGER);"                                    /* NULL = no completed win yet */
     "CREATE TABLE IF NOT EXISTS friends ("
     "  player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,"
     "  friend_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,"
@@ -499,10 +504,10 @@ static const char SCHEMA[] =
     "  p1_id INTEGER REFERENCES players(id) ON DELETE SET NULL,"
     "  name0 TEXT NOT NULL, name1 TEXT NOT NULL,"
     "  km0 INTEGER NOT NULL, km1 INTEGER NOT NULL,"
-    "  res0 TEXT NOT NULL, res1 TEXT NOT NULL);"                /* W L D F X */
+    "  res0 TEXT NOT NULL, res1 TEXT NOT NULL,"                 /* W L D F X */
+    "  turns INTEGER);"                                         /* NULL = not known */
     "CREATE INDEX IF NOT EXISTS games_p0 ON games(p0_id, id);"
-    "CREATE INDEX IF NOT EXISTS games_p1 ON games(p1_id, id);"
-    "PRAGMA user_version = 1;";
+    "CREATE INDEX IF NOT EXISTS games_p1 ON games(p1_id, id);";
 
 static int find_acct(const char *name)
 {
@@ -633,8 +638,9 @@ static long long id_by_name(const char *name)
 }
 
 /* id0 / id1 are players.id, or -1 for a guest */
+/* id0 / id1 are players.id, or -1 for a guest; turns <= 0 stores NULL (not known) */
 static int db_insert_game(time_t t, long long id0, long long id1, const char *n0, const char *n1,
-                          int km0, int km1, char r0, char r1)
+                          int km0, int km1, char r0, char r1, int turns)
 {
     sqlite3_stmt *st;
     char a[2], b[2];
@@ -643,8 +649,8 @@ static int db_insert_game(time_t t, long long id0, long long id1, const char *n0
     a[0] = r0; a[1] = '\0';
     b[0] = r1; b[1] = '\0';
     if (sqlite3_prepare_v2(g_db,
-            "INSERT INTO games(played_at,p0_id,p1_id,name0,name1,km0,km1,res0,res1) "
-            "VALUES(?,?,?,?,?,?,?,?,?)", -1, &st, NULL) != SQLITE_OK)
+            "INSERT INTO games(played_at,p0_id,p1_id,name0,name1,km0,km1,res0,res1,turns) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)", -1, &st, NULL) != SQLITE_OK)
         return db_error("prepare game");
     sqlite3_bind_int64(st, 1, (long long)t);
     if (id0 >= 0) sqlite3_bind_int64(st, 2, id0); else sqlite3_bind_null(st, 2);
@@ -655,6 +661,7 @@ static int db_insert_game(time_t t, long long id0, long long id1, const char *n0
     sqlite3_bind_int64(st, 7, km1);
     sqlite3_bind_text(st, 8, a, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 9, b, -1, SQLITE_TRANSIENT);
+    if (turns > 0) sqlite3_bind_int64(st, 10, turns); else sqlite3_bind_null(st, 10);
     rc = sqlite3_step(st);
     sqlite3_finalize(st);
     return rc == SQLITE_DONE ? 0 : db_error("insert game");
@@ -674,11 +681,24 @@ static int db_open(void)
     if (db_exec("PRAGMA foreign_keys = ON") < 0)
         return -1;
     ver = db_scalar("PRAGMA user_version");
-    if (ver > 1) {
+    if (ver > DB_VERSION) {
         fprintf(stderr, "%s was made by a newer version of HollyBornes (schema %lld)\n", path, ver);
         return -1;
     }
-    if (db_exec(SCHEMA) < 0)
+    if (db_exec(SCHEMA) < 0)                 /* creates missing tables; a no-op for existing ones */
+        return -1;
+    if (ver == 1) {                          /* upgrade 1 -> 2: turn records */
+        if (db_exec("BEGIN IMMEDIATE") < 0 ||
+            db_exec("ALTER TABLE players ADD COLUMN best_turns INTEGER") < 0 ||
+            db_exec("ALTER TABLE games ADD COLUMN turns INTEGER") < 0 ||
+            db_exec("COMMIT") < 0) {
+            db_exec("ROLLBACK");
+            fprintf(stderr, "could not upgrade %s to schema 2\n", path);
+            return -1;
+        }
+        logf_("database upgraded from schema 1 to 2 (turn records)");
+    }
+    if (ver < DB_VERSION && db_exec("PRAGMA user_version = 2") < 0)
         return -1;
     logf_("database: %s (SQLite %s)", path, sqlite3_libversion());
     return 0;
@@ -751,7 +771,7 @@ static int db_migrate_legacy(void)
             long t;
             int k0, k1;
             if (sscanf(line, "%ld %16s %16s %d %d %c %c", &t, n1, n2, &k0, &k1, &r0, &r1) == 7) {
-                if (db_insert_game((time_t)t, id_by_name(n1), id_by_name(n2), n1, n2, k0, k1, r0, r1) < 0)
+                if (db_insert_game((time_t)t, id_by_name(n1), id_by_name(n2), n1, n2, k0, k1, r0, r1, -1) < 0)
                     goto fail;
                 ng++;
             }
@@ -793,7 +813,7 @@ static void db_load(void)
         accts[i].online = -1;
 
     if (sqlite3_prepare_v2(g_db,
-            "SELECT id,name,salt,hash,created,played,won,lost,drawn,forfeits FROM players ORDER BY id",
+            "SELECT id,name,salt,hash,created,played,won,lost,drawn,forfeits,COALESCE(best_turns,0) FROM players ORDER BY id",
             -1, &st, NULL) == SQLITE_OK) {
         while (sqlite3_step(st) == SQLITE_ROW) {
             Account *a;
@@ -814,6 +834,7 @@ static void db_load(void)
             a->lost = sqlite3_column_int(st, 7);
             a->drawn = sqlite3_column_int(st, 8);
             a->forfeits = sqlite3_column_int(st, 9);
+            a->best_turns = sqlite3_column_int(st, 10);
         }
         sqlite3_finalize(st);
     } else {
@@ -876,6 +897,7 @@ static void finish_match(Match *m, int mode, int who)
 {
     char res[2];
     int km[2], okm[2], s;
+    int turns = -1, winner = -1, new_record = 0, prev_best = 0;
 
     if (m->done)
         return;
@@ -903,22 +925,46 @@ static void finish_match(Match *m, int mode, int who)
             res[0] = res[1] = 'X';
     }
 
-    if (g_accounts) {                       /* one transaction: game row + both players' totals */
+    /* The turn count is only trusted when both players reported the same result AND the
+     * same number of turns. It counts towards a record only for a game that was won by
+     * reaching exactly 1000 km (a "completed trip"). */
+    if (mode == 0 && m->turns[0] > 0 && m->turns[0] == m->turns[1]) {
+        turns = m->turns[0];
+        for (s = 0; s < 2; s++)
+            if (res[s] == 'W' && km[s] == 1000)
+                winner = s;
+    }
+
+    if (g_accounts) {                       /* one transaction: game row, totals and the record */
         db_exec("BEGIN IMMEDIATE");
         db_insert_game(time(NULL),
                        m->acct[0] >= 0 ? accts[m->acct[0]].dbid : -1,
                        m->acct[1] >= 0 ? accts[m->acct[1]].dbid : -1,
-                       m->name[0], m->name[1], km[0], km[1], res[0], res[1]);
+                       m->name[0], m->name[1], km[0], km[1], res[0], res[1], turns);
         for (s = 0; s < 2; s++)
             if (m->acct[s] >= 0)
                 record_stats(m->acct[s], res[s]);
+        if (winner >= 0 && m->acct[winner] >= 0) {
+            Account *w = &accts[m->acct[winner]];
+            if (w->best_turns == 0 || turns < w->best_turns) {      /* first win, or fewer turns */
+                if (db_run("UPDATE players SET best_turns=? WHERE id=?", "ii",
+                           (long long)turns, w->dbid) == 0) {
+                    prev_best = w->best_turns;
+                    w->best_turns = turns;
+                    new_record = 1;
+                }
+            }
+        }
         db_exec("COMMIT");
+        if (new_record)
+            notify_acct(m->acct[winner], "RECORD %d %d", turns, prev_best);
     }
-    logf_("game finished: %s %c / %s %c (mode %d)", m->name[0], res[0], m->name[1], res[1], mode);
+    logf_("game finished: %s %c / %s %c (mode %d%s)", m->name[0], res[0], m->name[1], res[1], mode,
+          new_record ? ", new turn record" : "");
 }
 
 /* a client reports "I have km, opponent has okm" */
-static void match_report(Client *c, int km, int okm)
+static void match_report(Client *c, int km, int okm, int turns)
 {
     Match *m;
     int s = c->side, o = 1 - c->side;
@@ -931,6 +977,7 @@ static void match_report(Client *c, int km, int okm)
     m->reported[s] = 1;
     m->km[s] = km;
     m->okm[s] = okm;
+    m->turns[s] = turns;
     if (!m->first_report)
         m->first_report = time(NULL);
     if (m->reported[o]) {
@@ -1365,8 +1412,8 @@ static void cmd_stats(Client *c, const char *arg)
     int t = target_acct(c, arg);
     if (t < 0)
         return;
-    queue_line(c, "STATS %s %d %d %d %d %d", accts[t].name, accts[t].played, accts[t].won,
-               accts[t].lost, accts[t].drawn, accts[t].forfeits);
+    queue_line(c, "STATS %s %d %d %d %d %d %d", accts[t].name, accts[t].played, accts[t].won,
+               accts[t].lost, accts[t].drawn, accts[t].forfeits, accts[t].best_turns);
 }
 
 static void cmd_history(Client *c, const char *arg)
@@ -1426,6 +1473,19 @@ static void cmd_leaders(Client *c)
 }
 
 /* ------------------------------------------------------ command parsing */
+
+static int parse_turns(const char *s, int *out)
+{
+    char *end;
+    long v;
+    if (!s || !*s)
+        return 0;
+    v = strtol(s, &end, 10);
+    if (*end != '\0' || v < 1 || v > MAX_TURNS)
+        return 0;
+    *out = (int)v;
+    return 1;
+}
 
 static int parse_km(const char *s, int *out)
 {
@@ -1522,15 +1582,16 @@ static void process_line(int idx, char *line)
         }
 
     } else if (strcmp(cmd, "RESULT") == 0) {
-        int km, okm;
+        int km, okm, turns = 0;
         char *a1 = strtok_r(NULL, " \t", &save);
         char *a2 = strtok_r(NULL, " \t", &save);
+        char *a3 = strtok_r(NULL, " \t", &save);      /* optional: number of turns played */
         if (c->match < 0) {
             queue_line(c, "ERR no match to report");
-        } else if (!parse_km(a1, &km) || !parse_km(a2, &okm)) {
-            queue_line(c, "ERR usage: RESULT <my km> <opponent km>");
+        } else if (!parse_km(a1, &km) || !parse_km(a2, &okm) || (a3 && !parse_turns(a3, &turns))) {
+            queue_line(c, "ERR usage: RESULT <my km> <opponent km> [<turns>]");
         } else {
-            match_report(c, km, okm);
+            match_report(c, km, okm, turns);
         }
 
     } else if (strcmp(cmd, "STATS") == 0 || strcmp(cmd, "HISTORY") == 0 ||

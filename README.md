@@ -85,6 +85,8 @@ These need a server started with `-d` and a password in the Online panel. Guests
 - If the two reports disagree, the game counts as played but has no winner.
 - Games against the computer are not recorded.
 
+**Fastest win.** The server also remembers, for every account, the fewest turns it has taken to win a game. A *turn* is one card played or discarded by either player, so the number covers the whole game (a safety card's bonus move counts as a turn; passing when you have no cards does not). The record is updated only for a **completed** game: both players report the same result and the same number of turns, the winner reached exactly 1000 km (not a win on distance when the draw pile ran out), and the winner is logged in. It changes only if it is your first record or the new game took **fewer** turns than your current one; equal does not count. When you set a record, the game log says so. The **Stats** window shows your fastest win, or "none yet".
+
 **Stats, History and Leaderboard** buttons show the totals and last 10 games of yourself, or of any player whose name you type in the box next to **Add friend**, and the top 10 players by wins.
 
 **Friends.** Type a player's name next to **Add friend** and press the button to send a request. The other player sees it in their Friends list and presses **Accept** (or **Remove / Decline**). If you both ask each other you become friends at once. The list shows whether each friend is online, queued or playing, and you get a message when a friend comes online. To play a friend, both of you enter the same **Room code** and press Find opponent.
@@ -185,10 +187,10 @@ When accounts are on, everything is stored in one SQLite file, `hollybornes.db`,
 
 | Table | Contents |
 |-------|----------|
-| `players` | One row per account: name, salted password hash, creation time and totals (played, won, lost, drawn, forfeits) |
+| `players` | One row per account: name, salted password hash, creation time, totals (played, won, lost, drawn, forfeits) and `best_turns`, the fewest turns in a completed win |
 | `friends` | Friendships, one row per direction |
 | `friend_requests` | Open friend requests |
-| `games` | Every finished game: time, both players (or guest names), distances and results (`W` won, `L` lost, `D` draw, `F` forfeit, `X` disputed) |
+| `games` | Every finished game: time, both players (or guest names), distances, results (`W` won, `L` lost, `D` draw, `F` forfeit, `X` disputed) and the number of turns when the two players agreed on it |
 
 Every change is written to the database immediately, so nothing is lost if the server crashes or the machine loses power. Player totals and friends are also kept in memory while the server runs. The `HISTORY` command reads the games table, so the full history of every game is kept even though the game only shows the last 10.
 
@@ -205,6 +207,8 @@ sqlite3 hollydata/hollybornes.db "SELECT name, won, played FROM players ORDER BY
 ```
 
 Stop the server before changing anything by hand, because it keeps player totals and friends in memory and would not notice the change (and could write the old values back).
+
+**Upgrading an existing database.** A database from the previous server version is upgraded automatically the first time the new server opens it: two columns are added for the turn records, and nothing else changes. Players start with no record until their next completed win, and the games already stored have no turn count.
 
 **Upgrading from the text-file version.** Earlier versions kept the data in `accounts.db` and `games.log`. If the data directory contains those files and no database yet, the server imports them automatically the first time it starts: accounts, passwords, totals, friendships, open requests and the full game archive. The old files are renamed to `accounts.db.migrated` and `games.log.migrated` and kept as a backup. If the import fails, nothing is changed and the server refuses to start.
 

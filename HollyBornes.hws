@@ -18,7 +18,7 @@
 @REQUIRE "rapagui.hwp"
 
 @APPTITLE "HollyBornes"
-@APPVERSION "$VER: HollyBornes 2.1 (29.10.2026)"
+@APPVERSION "$VER: HollyBornes 2.2 (30.10.2026)"
 @APPAUTHOR "Marisa Giancarla"
 @APPCOPYRIGHT "(C) 2026 Marisa Giancarla - GNU GPL"
 @APPDESCRIPTION "The classic French road-race card game"
@@ -81,6 +81,7 @@ G.seat = 0
 G.rx = ""             ; receive buffer
 G.oppname = "Computer"
 G.sel = -1
+G.turns = 0           ; turns taken so far in this game, by both players (a safety's bonus move counts)
 G.welcomed = False    ; server accepted our HELLO / LOGIN
 G.login = ""          ; account name when logged in with a password
 G.myname = ""         ; the name we introduced ourselves with (guest or account)
@@ -498,7 +499,7 @@ Function p_Finish()
    p_Log("*** GAME OVER: " .. msg$)
    p_PlayUI()
    If G.mode = 1
-      p_NetSend("RESULT " .. G.P[0].km .. " " .. G.P[1].km)
+      p_NetSend("RESULT " .. G.P[0].km .. " " .. G.P[1].km .. " " .. G.turns)
       p_NetSend("LEAVE")   ; back to the server lobby
    EndIf
    p_Refresh()
@@ -593,6 +594,7 @@ Function p_AITurn()
       If best >= 0
          c = G.P[1].hand[best]
          p_Remove(1, best)
+         G.turns = G.turns + 1
          again = p_Apply(1, c)
       Else
          best = 0
@@ -606,6 +608,7 @@ Function p_AITurn()
          Next
          c = G.P[1].hand[best]
          p_Remove(1, best)
+         G.turns = G.turns + 1
          p_Log("Computer discarded " .. p_Short$(c))
       p_PlayUI()
       EndIf
@@ -647,6 +650,7 @@ Function p_HumanPlay()
       Return
    EndIf
    p_Remove(0, slot)
+   G.turns = G.turns + 1
    extra = p_Apply(0, c)
    If G.mode = 1 Then p_NetSend("MOVE P " .. slot)
    If p_CheckEnd() = True Then Return
@@ -678,6 +682,7 @@ Function p_HumanDiscard()
    slot = G.sel
    c = G.P[0].hand[slot]
    p_Remove(0, slot)
+   G.turns = G.turns + 1
    p_Log("You discarded " .. p_Short$(c))
    p_PlayUI()
    If G.mode = 1 Then p_NetSend("MOVE D " .. slot)
@@ -825,6 +830,7 @@ Function p_NewGameAI()
    p_Draw(0)
    G.over = False
    G.sel = -1
+   G.turns = 0
    moai.DoMethod("log", "clear")
    p_Log("New game vs the Computer! First to exactly 1000 km wins. You need a GO card to get rolling.")
    p_Refresh()
@@ -1031,6 +1037,7 @@ Function p_StartNet(seat, opp$, csv$)
    Next
    G.over = False
    G.sel = -1
+   G.turns = 0
    moai.DoMethod("log", "clear")
    p_Log("Match found! You are playing " .. opp$ .. ".")
    p_PlayUI()
@@ -1079,6 +1086,7 @@ Function p_OppMove(kind$, slot)
       EndIf
       If ok = True
          p_Remove(1, slot)
+         G.turns = G.turns + 1
          If kind$ = "P"
             extra = p_Apply(1, c)
          Else
@@ -1104,7 +1112,7 @@ Function p_OppMove(kind$, slot)
 EndFunction
 
 Function p_NetLine(line$)
-   Local f, c, cmd$, slot
+   Local f, c, cmd$, slot, t$
    f, c = SplitStr(line$, " ")
    If c < 2
       cmd$ = line$
@@ -1177,7 +1185,26 @@ Function p_NetLine(line$)
       p_NetSend("FRIENDS")
    Case "STATS":
       If c >= 7
-         moai.Request("Stats: " .. f[1], "Games played: " .. f[2] .. "\nWon: " .. f[3] .. "\nLost: " .. f[4] .. "\nDrawn: " .. f[5] .. "\nForfeits: " .. f[6], "OK")
+         t$ = "Games played: " .. f[2] .. "\n"
+         t$ = t$ .. "Won: " .. f[3] .. "\n"
+         t$ = t$ .. "Lost: " .. f[4] .. "\n"
+         t$ = t$ .. "Drawn: " .. f[5] .. "\n"
+         t$ = t$ .. "Forfeits: " .. f[6] .. "\n"
+         If c >= 8 And f[7] <> "0"
+            t$ = t$ .. "Fastest win: " .. f[7] .. " turns"
+         Else
+            t$ = t$ .. "Fastest win: none yet"
+         EndIf
+         moai.Request("Stats: " .. f[1], t$, "OK")
+      EndIf
+   Case "RECORD":
+      If c >= 3
+         If f[2] = "0"
+            p_Log("New record! Your first completed win took " .. f[1] .. " turns.")
+         Else
+            p_Log("New personal record! You won in " .. f[1] .. " turns (your previous best was " .. f[2] .. ").")
+         EndIf
+         p_PlayUI()
       EndIf
    Case "GAME":
       If c >= 6 Then G.pop = G.pop .. f[3] .. " km to " .. f[4] .. " km against " .. f[2] .. " - " .. p_ResWord$(f[5]) .. "\n"
@@ -1545,7 +1572,7 @@ moai.CreateApp([[
          <hgroup>
             <image brush="1"/>
             <vgroup>
-               <text>HollyBornes 2.1</text>
+               <text>HollyBornes 2.2</text>
                <text> </text>
                <text>A Hollywood take on the classic French road-race</text>
                <text>card game Mille Bornes, written in Hollywood</text>
