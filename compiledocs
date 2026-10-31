@@ -1,0 +1,4 @@
+#!/bin/bash
+#typst compile README.md README.pdf
+pandoc README.md -o README.pdf --pdf-engine=weasyprint
+exit 0
